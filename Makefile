@@ -1,6 +1,11 @@
 # CMSC 411, Fall 2025, Term project Makefile
 
-simulator:
-	gcc project.c -o simulator
+TARGET = simulator
+
+CXX = g++
+CXXFLAGS = -g -Wall -std=c++17
+
+all:
+	g++ $(CXXFLAGS) project.cpp -o $(TARGET)
 clean:
-	rm simulator *.o core*
+	rm -f $(TARGET)

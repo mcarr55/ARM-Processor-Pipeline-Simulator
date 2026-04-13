@@ -1,0 +1,22 @@
+#compiled executable files
+.o
+.out
+
+#vscodefiles
+.vscode/
+
+#macOS files
+.DS_Store
+
+#build artifacts
+Makefile.swp
+simulator.dSYM/
+
+#files not meant to be saved
+data.txt
+inst.txt
+output.txt
+sample.cpp
+simulator
+
+inst.txt
