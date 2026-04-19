@@ -5,6 +5,7 @@
 #include <sstream>
 #include <algorithm>
 #include <map>
+#include <iomanip>
 using namespace std;
 
 
@@ -67,7 +68,7 @@ struct Instruction {
 
     int shift_amount = -1; //for shift in IM instructions
   
-    long long  immediate = 0;
+    long long immediate = 0;
     int address = -1; //branch target address for branch instructions
     string label = ""; //label for branch instructions
 
@@ -79,12 +80,11 @@ struct Instruction {
 
     //cycle components
     //to know the cycle each stage completes
-    int if_start = 0;
-    int if_end = 0;
-    int id_cycle = 0;
-    int ex_cycle = 0;
-    int mem_cycle = 0;
-    int wb_cycle = 0;
+    int if_exit = -1;
+    int id_exit = -1;
+    int ex_exit = -1;
+    int mem_exit = -1;
+    int wb_exit = -1;
 
 
     //values read from registers during decode, used for execution
@@ -107,12 +107,12 @@ map<string, int> labels = {
     };
 
 //store instructions in cycle, keep count with PC and cycle count
-Instruction IF_ID_latch;
-Instruction ID_IU1_latch;
-Instruction IU1_IU2_latch;
-Instruction IU2_IU3_latch;
-Instruction IU3_MEM_latch;
-Instruction MEM_WB_latch;
+Instruction IF_ID_register;
+Instruction ID_IU1_register;
+Instruction IU1_IU2_register;
+Instruction IU2_IU3_register;
+Instruction IU3_MEM_register;
+Instruction MEM_WB_register;
 
 int PC = 0; 
 int cycle = 0;
@@ -141,8 +141,7 @@ void readInstructions(string filename);
 
 bool checkOpcode(string opcode, vector<string> type_vector);
 
-//for the simulator
-
+//simulator pipeline funcitons
 // 5. Writeback (WB) - Update registers
 void writeBack();
 
@@ -157,6 +156,9 @@ void decode();
 
 // 1. Fetch (IF) - Get next instruction
 void fetch(vector<Instruction>& program);
+
+
+void debugFunction();
 
 
 
@@ -201,8 +203,8 @@ int main(){
     printInstructions();
     
    
-   int_registers[2] = 100; //temp test value
-   //int_registers[3] = 50;
+   int_registers[2] = 25; //temp test value
+   int_registers[3] = 19;
 
     //create a loop to run the simulator until we hit a HALT instruction or run out of instructions
 
@@ -214,21 +216,12 @@ int main(){
 
         cycle++;
 
-        //move info foward in the pipeline, 
-
-        //Move IU instuction once each stage
-        MEM_WB_latch  = IU3_MEM_latch;
-        IU3_MEM_latch = IU2_IU3_latch;
-        IU2_IU3_latch = IU1_IU2_latch;
-
-        // This moves the instruction that execute() just worked on
-        IU1_IU2_latch = ID_IU1_latch; 
-    
-        // This moves the instruction that decode() just worked on
-        ID_IU1_latch  = IF_ID_latch;
-
         //backwards to 
         // 3. Writeback (WB)
+        writeBack();
+
+        //Move IU instuction once each stage
+        //MEM_WB_register  = IU3_MEM_register;
 
         // 2. Memory (MEM)
         memory();
@@ -236,90 +229,41 @@ int main(){
         // 2. Execute (EX)
         execute();
 
+
+
+        //IU3_MEM_register = IU2_IU3_register;
+
+        //IU2_IU3_register = IU1_IU2_register;
+
+
         // 1. Decode (ID)
         decode();
 
         // 0. Fetch (IF)
         fetch(instruct_list);
 
+        debugFunction();
 
 
 
-        //debug for fetch
-        cout << "fetch_debug" << endl;
-        cout << "Cycle " << cycle << " | IF_ID holds: " << IF_ID_latch.opcode << endl;
-        cout << "Cycle " << cycle << " | ID_IU1 holds: " << ID_IU1_latch.opcode << endl;
-        cout << "-----------------------------------" << endl;
-       
-        
 
+        //move info foward in the pipeline, 
 
-
-        //debug for decode
-        cout << "decode_debug" << endl;
-        cout << "Cycle " << cycle << ":" << endl;
-        cout << "  Fetch Stage (IF_ID): " << IF_ID_latch.opcode << endl;
-        cout << "  Decode Stage (ID_IU1): " << ID_IU1_latch.opcode 
-        << " | Val1: " << ID_IU1_latch.val1 
-        << " | Val2: " << ID_IU1_latch.val2 << endl;
-        cout << "-----------------------------------" << endl;
   
 
-        //debug for result of execution
-        cout << "execute_debug" << endl;
-        cout << "Cycle " << cycle << ":" << endl;
-        cout << "  Execute Stage (IU1_IU2): " << IU1_IU2_latch.opcode 
-        << " | Result: " << IU1_IU2_latch.result << endl;
-        cout << "-----------------------------------" << endl;
-        cout << endl;
+
     
 
-        /*
-        cout << "--- Cycle " << cycle << " ---" << endl;
-        cout << "ID_IU1_latch Opcode: " << ID_IU1_latch.opcode << endl;
-        cout << "ID_IU1_latch Val1 (Rn): " << ID_IU1_latch.val1 << endl;
-        cout << "ID_IU1_latch Val2 (Rm/Imm): " << ID_IU1_latch.val2 << endl;
-        cout << "----------------------" << endl;
-        */
+   
+    
 
-        /*
-        if (IU1_IU2_latch.opcode != "EMPTY") {
-            cout << "Execute Stage | Op: " << IU1_IU2_latch.opcode 
-            << " | " << IU1_IU2_latch.val1 << " " << IU1_IU2_latch.opcode << " " << IU1_IU2_latch.val2 
-            << " = " << IU1_IU2_latch.result << endl;
-        }
-        */
 
-        /*
-        // Inside your while loop, after all functions and movements:
-        cout << "CYCLE " << cycle << " DEBUG:" << endl;
-        cout << "  1. IF_ID   Op: " << IF_ID_latch.opcode << endl;
-        cout << "  2. ID_IU1  Op: " << ID_IU1_latch.opcode << " | V1: " << ID_IU1_latch.val1 << " | V2: " << ID_IU1_latch.val2 << endl;
-        cout << "  3. IU1_IU2 Op: " << IU1_IU2_latch.opcode << " | Res: " << IU1_IU2_latch.result << endl;
-        */
 
-        /*
-        // --- FINAL PIPELINE SNAPSHOT ---
-        cout << "================ CYCLE " << cycle << " ================" << endl;
-        cout << " [IF]  Latch: " << IF_ID_latch.opcode << endl;
 
-        cout << " [ID]  Latch: " << ID_IU1_latch.opcode 
-            << " | V1: " << ID_IU1_latch.val1 
-            << " | V2: " << ID_IU1_latch.val2 << endl;
-
-        cout << " [EX]  Latch: " << IU1_IU2_latch.opcode 
-            << " | Result: " << IU1_IU2_latch.result << endl;
-
-        cout << " [MEM] Latch: " << IU3_MEM_latch.opcode 
-            << " | Result: " << IU3_MEM_latch.result << endl;
-
-        cout << " [WB]  Latch: " << MEM_WB_latch.opcode 
-            << " | Writing " << MEM_WB_latch.result << " to R" << MEM_WB_latch.rd << endl;
-        cout << "==========================================" << endl << endl;
-        */
+        
 
         // A temporary break so we don't loop forever while testing
-        if (cycle > 10) break; 
+        if (cycle > 5) break; 
 }
 
     return 0;
@@ -568,8 +512,6 @@ struct Instruction createInstruction(vector<string>& tokens){
     }
 
      return instr; // Return the instruction struct (may be uninitialized if opcode is unknown)
-
-    
 }
 
 
@@ -582,13 +524,15 @@ bool checkOpcode(string opcode, vector<string> type_vector){
     return false;
 }
 
-//look at the PC, grab the current instruction from the instruction vector, put it into the IF_ID_latch.
+//look at the PC, grab the current instruction from the instruction vector, put it into the IF_ID_register.
 void fetch(vector<Instruction>& program){
 
     // If the PC is within the bounds of our instruction vector
     if (PC / 4 < program.size()) {
 
-        IF_ID_latch = program[PC / 4];
+        IF_ID_register = program[PC / 4];
+
+        IF_ID_register.if_exit = cycle;
 
         // Move to the next instruction address
         PC += 4; 
@@ -596,84 +540,149 @@ void fetch(vector<Instruction>& program){
     
     else {
 
-        // If we ran out of instructions, put an "Empty" one in the latch
-        IF_ID_latch = Instruction(); 
-        IF_ID_latch.opcode = "";
+        // If we ran out of instructions, put an "Empty" one in the register
+        IF_ID_register = Instruction(); 
+        IF_ID_register.opcode = "";
     }
 }
 
-//look up values in register file, put them in the ID_IU1_latch for the next stage
+//look up values in register file, put them in the ID_IU1_register for the next stage
 void decode(){
 
+    //cout << IF_ID_register.opcode << " is in decode stage" << endl;
+
     // grab the register values If it's a real instruction or not EMPTY, 
-    if (IF_ID_latch.opcode != "") {
+    if (IF_ID_register.opcode != "") {
+
+
+
+        //*temporary aaaignment*
+        ID_IU1_register = IF_ID_register;
+
+
+
+
+        ID_IU1_register.opcode = IF_ID_register.opcode;
+
+
+
 
         // Read the first source register value
 
         // XZR should always return 0
-        if (ID_IU1_latch.rn == 31) {
-            ID_IU1_latch.val1 = 0;
+        if (IF_ID_register.rn == 31) {
+            ID_IU1_register.val1 = 0;
         }
 
         else{
             // Example: If the instruction uses 'rn' (first source register)
             // We look up its value in our physical register array      
-           ID_IU1_latch.val1 = int_registers[ID_IU1_latch.rn];
+           ID_IU1_register.val1 = int_registers[IF_ID_register.rn];
         }
 
         //Second source register or immediate value
 
          // For ADDI or SUBI, use immediate is already in struct.
-        if (ID_IU1_latch.opcode == "ADDI" || ID_IU1_latch.opcode == "SUBI" || 
-            ID_IU1_latch.opcode == "LDUR" || ID_IU1_latch.opcode == "STUR" ||
-            ID_IU1_latch.opcode == "LSL" || ID_IU1_latch.opcode == "LSR" ||
-            ID_IU1_latch.opcode == "ANDI" || ID_IU1_latch.opcode == "ORRI") {
+        if (IF_ID_register.opcode == "ADDI" || IF_ID_register.opcode == "SUBI" || 
+            IF_ID_register.opcode == "LDUR" || IF_ID_register.opcode == "STUR" ||
+            IF_ID_register.opcode == "LSL" || IF_ID_register.opcode == "LSR" ||
+            IF_ID_register.opcode == "ANDI" || IF_ID_register.opcode == "ORRI") {
                 
-            ID_IU1_latch.val2 = ID_IU1_latch.immediate;
+            ID_IU1_register.val2 = ID_IU1_register.immediate;
         }
 
-        else if (ID_IU1_latch.rn == 31) {
-            ID_IU1_latch.val2 = 0;
+        else if (IF_ID_register.rn == 31) {
+            ID_IU1_register.val2 = 0;
         }
 
         else{
-            ID_IU1_latch.val2 = int_registers[ID_IU1_latch.rm];
+            ID_IU1_register.val2 = int_registers[IF_ID_register.rm];
         }
+
+        ID_IU1_register.id_exit = cycle;
+
+
 
     }
 }
 
 
 void execute(){
-    // IU1 reads from the latch filled by Decode
+    // IU1 reads from the register filled by Decode
 
-    //cout << "opcode in execute is " << ID_IU1_latch.opcode << endl;
+    //move 
 
-    if (IU1_IU2_latch.opcode != "") {
-        string op = IU1_IU2_latch.opcode;
 
+
+
+    //cout << "opcode in execute is " << ID_IU1_register.opcode << endl;
+
+    if (ID_IU1_register.opcode != "") {
+
+        //changed op
+        string op = ID_IU1_register.opcode;
+
+        // --- LEVEL 3 (IU3) ---
+        // MUL finally finishes its 3rd cycle here
+        if (op == "MUL") {
+          
+        } 
+
+        // --- LEVEL 2 (IU2) ---
+        // ADD and SUB finish their 2nd cycle here
         if (op == "ADD" || op == "ADDI") {
-            IU1_IU2_latch.result = IU1_IU2_latch.val1 + IU1_IU2_latch.val2;
-            cout << "  [ALU] Math Check: " << IU1_IU2_latch.val1 << " + " << IU1_IU2_latch.val2 << " = " << IU1_IU2_latch.result << endl;
+            IU1_IU2_register.result = IU1_IU2_register.val1 + IU1_IU2_register.val2;
+            cout << "  [ALU] Math Check: " << IU1_IU2_register.val1 << " + " << IU1_IU2_register.val2 << " = " << IU1_IU2_register.result << endl;
         } 
         else if (op == "SUB" || op == "SUBI") {
-            IU1_IU2_latch.result = IU1_IU2_latch.val1 - IU1_IU2_latch.val2;
+            IU1_IU2_register.result = IU1_IU2_register.val1 - IU1_IU2_register.val2;
         }
+
+        // --- LEVEL 1 (IU1) ---
+        // Normal 1-cycle ops (AND, ORR, LSL) finish here
+
+
+
+
         else if (op == "AND" || op == "ANDI") {
-            IU1_IU2_latch.result = IU1_IU2_latch.val1 & IU1_IU2_latch.val2;
+
+            cout << "and" << endl;
+
+            //temporary assignment
+            IU3_MEM_register = ID_IU1_register;
+
+
+            IU3_MEM_register.result = ID_IU1_register.val1 & ID_IU1_register.val2;
+
+            IU3_MEM_register.opcode = op;
+            IU3_MEM_register.ex_exit = cycle;
+
+            IU3_MEM_register.rd = ID_IU1_register.rd;
         }
+
         else if (op == "ORR" || op == "ORRI") {
-            IU1_IU2_latch.result = IU1_IU2_latch.val1 | IU1_IU2_latch.val2;
+            IU1_IU2_register.result = IU1_IU2_register.val1 | IU1_IU2_register.val2;
         }
 
         // Shifts (LSL/LSR)
         else if (op == "LSL") {
-            IU1_IU2_latch.result = (uint32_t)IU1_IU2_latch.val1 << IU1_IU2_latch.val2;
+
+            IU3_MEM_register.result = (uint32_t)IU1_IU2_register.val1 << IU1_IU2_register.val2;
+
+            IU3_MEM_register.ex_exit = cycle;
         }
+
         else if (op == "LSR") {
-            IU1_IU2_latch.result = (uint32_t)IU1_IU2_latch.val1 >> IU1_IU2_latch.val2;
+
+            IU3_MEM_register.result = (uint32_t)IU1_IU2_register.val1 >> IU1_IU2_register.val2;
+
+            IU3_MEM_register.opcode = op;
+
+            IU3_MEM_register.ex_exit = cycle;
         }
     }
+
+
     else{
 
         //cout << "  [ALU] Invalid instruction" << endl;
@@ -684,29 +693,45 @@ void execute(){
 }
 
 void memory(){
-   // MEM works on the instruction in the IU2_IU3 latch
-    if (IU2_IU3_latch.opcode != "EMPTY") {
+
+   // MEM works on the instruction in the IU3_MEM register
+    if (IU3_MEM_register.opcode != "") {
         
-        string op = IU2_IU3_latch.opcode;
-        int address = IU2_IU3_latch.result; // The address calculated in EX
+        string op = IU3_MEM_register.opcode;
+        int address = IU3_MEM_register.result; // The address calculated in EX
 
         if (op == "LDUR") {
             // Read from memory into the result field
-            IU2_IU3_latch.result = data_memory[address];
+            IU2_IU3_register.result = data_memory[IU3_MEM_register.address];
         } 
         else if (op == "STUR") {
             // Write the value of the source register into memory
             // Note: For STUR, 'val3' or 'rt' is the data to be stored
-            data_memory[address] = int_registers[IU2_IU3_latch.rd];
+
+            //finish
+            data_memory[address] = int_registers[IU2_IU3_register.rd];
         }
+        else{
+
+            //temporary assignemnt
+            MEM_WB_register = IU3_MEM_register;
+
+            cout << "transfered" << endl;
+            MEM_WB_register.result = IU3_MEM_register.result;
+            MEM_WB_register.rd = IU3_MEM_register.rd;
+            MEM_WB_register.mem_exit = cycle;
+
+
+        }
+
     }
 }
 
-void writeback() {
-    // WB works on the instruction in the very last latch
-    if (MEM_WB_latch.opcode != "EMPTY") {
+void writeBack() {
+    // WB works on the instruction in the very last register
+    if (MEM_WB_register.opcode != "") {
         
-        string op = MEM_WB_latch.opcode;
+        string op = MEM_WB_register.opcode;
 
         // Instructions that write to a register
         if (op == "ADD" || op == "ADDI" || op == "SUB" || op == "SUBI" || 
@@ -714,8 +739,8 @@ void writeback() {
             op == "LDUR") {
             
             // Safety check: Never write to R31 (the zero register)
-            if (MEM_WB_latch.rd != 31 && MEM_WB_latch.rd != -1) {
-                int_registers[MEM_WB_latch.rd] = MEM_WB_latch.result;
+            if (MEM_WB_register.rd != 31 && MEM_WB_register.rd != -1) {
+                int_registers[MEM_WB_register.rd] = MEM_WB_register.result;
             }
         }
     }
@@ -724,4 +749,98 @@ void writeback() {
 //When testing your WB stage, try printing your registers at the very end of each cycle. 
 //You will see that even though ADDI shows up in the trace at Cycle 1, the int_registers[rd] 
 //value won't change until the end of Cycle 4 or beginning of Cycle 5.
+
+
+void debugFunction(){
+
+    //debug for fetch
+    cout << "fetch_debug" << endl;
+    cout << "Cycle " << cycle << " | IF_ID holds: " << IF_ID_register.opcode << endl;
+    cout << "Cycle " << cycle << " | ID_IU1 holds: " << ID_IU1_register.opcode << endl;
+    cout << "-----------------------------------" << endl;
+
+    //debug for decode
+    cout << "decode_debug" << endl;
+    cout << "Cycle " << cycle << ":" << endl;
+    cout << "  Fetch Stage (IF_ID): " << IF_ID_register.opcode << endl;
+    cout << "  Decode Stage (ID_IU1): " << ID_IU1_register.opcode 
+    << " | Val1: " << ID_IU1_register.val1 
+    << " | Val2: " << ID_IU1_register.val2 << endl;
+    cout << "-----------------------------------" << endl;
+  
+
+    //debug for result of execution
+    cout << "execute_debug" << endl;
+    cout << "Cycle " << cycle << ":" << endl;
+    cout << "  Execute Stage (IU1_IU2): " << IU3_MEM_register.opcode 
+    << " | Result: " << IU3_MEM_register.result << endl;
+    cout << "-----------------------------------" << endl;
+
+
+    //debug writeBack
+    cout << "writeBack_debug" << endl;
+    cout << "Destination Register Location: " << MEM_WB_register.rd << endl;
+    cout << "value: " << int_registers[MEM_WB_register.rd] << endl;
+    cout << endl;
+    cout << endl;
+
+        
+    
+
+        /*
+        cout << "--- Cycle " << cycle << " ---" << endl;
+        cout << "ID_IU1_register Opcode: " << ID_IU1_register.opcode << endl;
+        cout << "ID_IU1_register Val1 (Rn): " << ID_IU1_register.val1 << endl;
+        cout << "ID_IU1_register Val2 (Rm/Imm): " << ID_IU1_register.val2 << endl;
+        cout << "----------------------" << endl;
+        */
+
+        /*
+        if (IU1_IU2_register.opcode != "EMPTY") {
+            cout << "Execute Stage | Op: " << IU1_IU2_register.opcode 
+            << " | " << IU1_IU2_register.val1 << " " << IU1_IU2_register.opcode << " " << IU1_IU2_register.val2 
+            << " = " << IU1_IU2_register.result << endl;
+        }
+        */
+
+        /*
+        // Inside your while loop, after all functions and movements:
+        cout << "CYCLE " << cycle << " DEBUG:" << endl;
+        cout << "  1. IF_ID   Op: " << IF_ID_register.opcode << endl;
+        cout << "  2. ID_IU1  Op: " << ID_IU1_register.opcode << " | V1: " << ID_IU1_register.val1 << " | V2: " << ID_IU1_register.val2 << endl;
+        cout << "  3. IU1_IU2 Op: " << IU1_IU2_register.opcode << " | Res: " << IU1_IU2_register.result << endl;
+        */
+
+        /*
+        // --- FINAL PIPELINE SNAPSHOT ---
+        cout << "================ CYCLE " << cycle << " ================" << endl;
+        cout << " [IF]  register: " << IF_ID_register.opcode << endl;
+
+        cout << " [ID]  register: " << ID_IU1_register.opcode 
+            << " | V1: " << ID_IU1_register.val1 
+            << " | V2: " << ID_IU1_register.val2 << endl;
+
+        cout << " [EX]  register: " << IU1_IU2_register.opcode 
+            << " | Result: " << IU1_IU2_register.result << endl;
+
+        cout << " [MEM] register: " << IU3_MEM_register.opcode 
+            << " | Result: " << IU3_MEM_register.result << endl;
+
+        cout << " [WB]  register: " << MEM_WB_register.opcode 
+            << " | Writing " << MEM_WB_register.result << " to R" << MEM_WB_register.rd << endl;
+        cout << "==========================================" << endl << endl;
+        */
+
+
+}
+
+/*
+void writeOutput(const string& filename, const vector<Instruction>& trace, int i_access, int i_hits, int d_access, int d_hits) {
+
+    ofstream outFile(filename);
+
+
+    outFile.close();
+}
+    */
 
