@@ -138,6 +138,8 @@ int i_hit;
 int d_req;
 int d_hit;
 
+bool busy_iu; //if the iu is currently busy with an operation, other pars of the code cant write
+
 
 
 //for the datafile
@@ -238,12 +240,22 @@ int main(){
     int_registers[10] = 16;
     */
 
+    int_registers[2] = 2;
+    int_registers[3] = 3;
+
+    int_registers[5] = 20;
+    int_registers[6] = 2;
+
 
 
     for (std::size_t i = 0; i < instruct_list.size(); ++i) {
         instruct_list[i].raw_line =  line_list[i];
         instruct_list[i].number_id = i;
     }
+
+    //print intiial latency:
+    cout << "init latency is: " <<  instruct_list[0].latency << endl;
+
 
     //create a loop to run the simulator until we hit a HALT instruction or run out of instructions
 
@@ -268,16 +280,17 @@ int main(){
         // 2. Execute (EX)
         execute();
 
-        //IU3_MEM_register = IU2_IU3_register;
+        if (busy_iu == false){
+            // 1. Decode (ID)
+            decode();
 
-        //IU2_IU3_register = IU1_IU2_register;
+            // 0. Fetch (IF)
+            fetch(instruct_list);
+
+        }
 
 
-        // 1. Decode (ID)
-        decode();
 
-        // 0. Fetch (IF)
-        fetch(instruct_list);
 
         debugFunction();
 
@@ -300,14 +313,14 @@ int main(){
         
 
         // A temporary break so we don't loop forever while testing
-        if (cycle > 15) break; 
+        if (cycle > 8) break; 
     }
 
    
 
     printOutputFile("output.txt");
 
-
+    /*
     cout << "int reg 1: " << int_registers[1] << endl;
     cout << "int reg 5: " << int_registers[5] << endl;
     cout << "int reg 6: " << int_registers[6] << endl;
@@ -315,6 +328,13 @@ int main(){
     cout << "int reg 8: " << int_registers[8] << endl;
     cout << "int reg 9: " << int_registers[9] << endl;
     cout << "int reg 10: " << int_registers[10] << endl;
+    */
+
+    //should be 5
+    cout << "int reg 1: " << int_registers[1] << endl;
+
+    //should be  18
+    cout << "int reg 4: " << int_registers[4] << endl;
 
     return 0;
 }
@@ -594,6 +614,8 @@ void fetch(vector<Instruction>& program){
     
     else {
 
+        cout << "adding empty intruction" << endl;
+
         // If we ran out of instructions, put an "Empty" one in the register
         IF_ID_register = Instruction(); 
         IF_ID_register.opcode = "";
@@ -645,10 +667,12 @@ void decode(){
 
 
 
-        ID_IU1_register.opcode = IF_ID_register.opcode;
+        
         ID_IU1_register.if_exit = IF_ID_register.if_exit;
         ID_IU1_register.id_exit = cycle;
+
         ID_IU1_register.rd = IF_ID_register.rd;
+        ID_IU1_register.latency = IF_ID_register.latency;
 
 
 
@@ -667,9 +691,6 @@ void execute(){
     //move 
 
     //check cases where ADD/SUB take longer in pipeline
-     if (ID_IU1_register.opcode == "ADD") {
-
-     }
 
 
     if (ID_IU1_register.opcode != "") {
@@ -686,16 +707,47 @@ void execute(){
         // --- LEVEL 2 (IU2) ---
         else if (op == "ADD" || op == "ADDI" || op == "SUB" || op == "SUBI"){
 
-            //move it IU3 when ready
+            cout << "we are stalling " << op << endl;
+            cout << ID_IU1_register.latency << endl;
+
+            //check it for latency, if not ready stall 
+            if(ID_IU1_register.latency > 1){
+
+                busy_iu = true;
+                ID_IU1_register.latency -= 1;
+
+                //pass empty intruciton foward while stalling
+                IU3_MEM_register = Instruction(); 
+                IU3_MEM_register.opcode = "";
+                return;
+            }
+            else{
+                busy_iu = false;
+            }
+
 
             // ADD and SUB finish their 2nd cycle here
             if (op == "ADD" || op == "ADDI") {
-                IU3_MEM_register.result = IU1_IU2_register.val1 + IU1_IU2_register.val2;
-                cout << "  [ALU] Math Check: " << IU1_IU2_register.val1 << " + " << IU1_IU2_register.val2 << " = " << IU1_IU2_register.result << endl;
-            } 
+                IU3_MEM_register.result = ID_IU1_register.val1 + ID_IU1_register.val2;
+                } 
             if (op == "SUB" || op == "SUBI") {
-                IU3_MEM_register.result = IU1_IU2_register.val1 - IU1_IU2_register.val2;
+                IU3_MEM_register.result = ID_IU1_register.val1 - ID_IU1_register.val2;
             }
+
+            cout << "we've done add" << endl;
+
+            //copy over other info
+               
+            //cycle info
+            IU3_MEM_register.opcode = ID_IU1_register.opcode;
+            IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
+            IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
+            IU3_MEM_register.ex_exit = cycle;
+            
+
+            IU3_MEM_register.rd = ID_IU1_register.rd;
+
+            IU3_MEM_register.number_id = ID_IU1_register.number_id;
 
 
         }
@@ -840,6 +892,12 @@ void writeBack() {
                 instruct_list[MEM_WB_register.number_id].ex_exit = MEM_WB_register.ex_exit;
                 instruct_list[MEM_WB_register.number_id].mem_exit = MEM_WB_register.mem_exit;
                 instruct_list[MEM_WB_register.number_id].wb_exit = MEM_WB_register.wb_exit;
+
+                
+                //remove after writing for safety?
+                MEM_WB_register = Instruction(); 
+                MEM_WB_register.opcode = "";
+                
                 
             }
         }
@@ -974,8 +1032,13 @@ void printOutputFile(string filename) {
 
         // Helper lambda to print a number or a blank space if it's -1
         auto printStage = [&](int cycle, int width) {
-            if (cycle != -1) outFile << right << setw(width) << cycle;
-            else outFile << setw(width) << " ";
+            if (cycle != -1){
+                 outFile << right << setw(width) << cycle;
+            } 
+           
+            else{
+                outFile << setw(width) << " ";
+            } 
         };
 
         // Print each column
