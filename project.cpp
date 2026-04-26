@@ -105,6 +105,83 @@ struct Instruction {
     bool regWrite = false;
 };
 
+//cache blocks:
+int icache_miss_delay = 0;
+bool final_hlt_fetch_started = false; // To trigger the last 12-cycle miss
+int i_req = 0, i_hit = 0;
+
+struct ICacheLine {
+    bool valid = false;
+    int tag = -1;
+};
+ICacheLine i_cache[4]; // 4 blocks (standard for this project)
+
+// Help the simulator know how to split the address
+struct ICacheParts { int tag; int index; };
+ICacheParts splitICache(int address) {
+    ICacheParts p;
+    p.index = (address >> 4) & 0x3; // Bits 4-5 for index
+    p.tag = (address >> 6);        // Bits 6+ for tag
+    return p;
+}
+
+//global variables
+bool icache_access_in_progress = false; 
+bool memory_busy_with_dcache = false;
+
+// Statistics
+int icache_accesses = 0;
+
+struct DCacheBlock {
+    bool valid = false;
+    bool dirty = false;
+    uint32_t tag = 0;
+    uint32_t words[4];
+    int lru_bit = 0; // For 2-way, a simple 0 or 1 is enough to track "Last Used"
+};
+
+DCacheBlock d_cache[2][2];
+
+struct DCacheParts {
+    uint32_t tag;
+    uint32_t index;
+    uint32_t wordOffset;
+};
+
+DCacheParts splitDCache(uint32_t addr) {
+    DCacheParts p;
+    // Bits 0-1: Byte Offset (ignored)
+    // Bits 2-3: Word Offset (same as I-Cache)
+    p.wordOffset = (addr >> 2) & 0x3; 
+    
+    // Bit 4: Index (chooses Set 0 or Set 1)
+    p.index = (addr >> 4) & 0x1;      
+    
+    // Bits 5-31: Tag
+    p.tag = (addr >> 5);              
+    
+    return p;
+}
+
+
+
+
+//memory controller logic
+int memory_busy_counter = 0; // Cycles remaining for current memory task
+bool memory_serving_icache = false;
+bool memory_serving_dcache = false;
+
+// Statistics
+int icache_hits = 0, icache_misses = 0;
+int dcache_hits = 0, dcache_misses = 0;
+
+int d_req = 0;
+int d_hit = 0;
+
+
+
+
+
 //vector address = memory address / 4 (since each instruction is 4 bytes)
 vector<Instruction> instruct_list; // Vector to hold the instructions read from the file
 
@@ -139,12 +216,12 @@ bool loadStall = false;
 
 vector<string> line_list; // Vector to hold string of instructions read from the file
 
-int i_req;
-int i_hit;
-int d_req;
-int d_hit;
+
 
 bool busy_iu; //if the iu is currently busy with an operation, other pars of the code cant write
+
+bool is_final_miss = false; // Tracks if we are in the 12-cycle wait for the second HLT
+
 
 
 
@@ -318,6 +395,12 @@ int main(){
             }
         }
 
+    // 2. Termination Logic:
+    // We stop when the second HLT fetch (the "ghost" fetch) finishes its miss
+    if (final_hlt_fetch_started && icache_miss_delay == 0) {
+        break;
+    }
+
 
 
 
@@ -342,7 +425,7 @@ int main(){
         
 
         // A temporary break so we don't loop forever while testing
-        if (cycle > 8 || activeHalt == true) break; 
+        if (cycle > 30 || activeHalt == true) break; 
     }
 
    
@@ -658,31 +741,52 @@ bool checkOpcode(string opcode, vector<string> type_vector){
 }
 
 //look at the PC, grab the current instruction from the instruction vector, put it into the IF_ID_register.
+//look at the PC, grab the current instruction from the instruction vector, put it into the IF_ID_register.
 void fetch(vector<Instruction>& program){
+
+    // A: Handle active stalls
+    if (icache_miss_delay > 0) {
+        icache_miss_delay--;
+        return; 
+    }
 
     // If the PC is within the bounds of our instruction vector
     if (PC / 4 < program.size()) {
+        ICacheParts p = splitICache(PC);
+        i_req++;
 
-        IF_ID_register = program[PC / 4];
 
-        IF_ID_register.if_exit = cycle;
+        if (i_cache[p.index].valid && i_cache[p.index].tag == p.tag) {
+            // CACHE HIT - Only here do we move the PC and record the exit
+            i_hit++;
 
-        //update leaving value
-        instruct_list[IF_ID_register.number_id].if_exit = IF_ID_register.if_exit;
+            IF_ID_register = program[PC / 4];
 
-        // Move to the next instruction address
-        PC += 4; 
-    } 
+            IF_ID_register.if_exit = cycle;
+
+            //update leaving value
+            instruct_list[IF_ID_register.number_id].if_exit = IF_ID_register.if_exit;
+
+            // Move to the next instruction address
+            PC += 4; 
+        } 
     
-    else {
+        else {
 
-        cout << "adding empty intruction" << endl;
-
-        // If we ran out of instructions, put an "Empty" one in the register
-        IF_ID_register = Instruction(); 
-        IF_ID_register.opcode = "";
+            // CACHE MISS - Start 12 cycle wait. Do NOT increment PC.
+            icache_miss_delay = 11; // 12 cycles total including this one
+            i_cache[p.index].valid = true;
+            i_cache[p.index].tag = p.tag;
+            // The function returns, and next cycle it will check the delay again.
+        }
+    }
+    else if (!final_hlt_fetch_started) {
+        i_req++;
+        icache_miss_delay = 11; 
+        final_hlt_fetch_started = true;
     }
 }
+
 
 //look up values in register file, put them in the ID_IU1_register for the next stage
 void decode(){
@@ -738,8 +842,7 @@ void decode(){
             // We look up its value in our physical register array      
            ID_IU1_register.val1 = int_registers[IF_ID_register.rn];
         }
-
-        //Second source register or immediate value
+         //Second source register or immediate value
 
          // For ADDI or SUBI, use immediate is already in struct.
         if (IF_ID_register.opcode == "ADDI" || IF_ID_register.opcode == "SUBI" || 
@@ -1296,6 +1399,7 @@ void printOutputFile(string filename) {
 
   // 2. The Loop
     for (const auto& inst : instruct_list) {
+        
 
         // Print the original string you saved during parsing
         outFile << left << setw(30) << inst.raw_line;
