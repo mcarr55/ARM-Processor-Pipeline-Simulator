@@ -96,10 +96,13 @@ struct Instruction {
 
     int number_id = -1;
 
+
     //helper flags
 
     //helps if it uses r or d registers
     bool is_fp = false; // True for LDURD/STURD (needs 2 memory cycles)
+
+    bool regWrite = false;
 };
 
 //vector address = memory address / 4 (since each instruction is 4 bytes)
@@ -126,6 +129,8 @@ Instruction post_WB_register_info;
 int PC = 0; 
 int cycle = 0;
 bool activeHalt = false;
+
+bool loadStall = false;
 
 
 
@@ -181,6 +186,9 @@ void debugFunction();
 void passTime(Instruction newIntruct, Instruction oldIntruct);
 
 void printExits(Instruction instruct);
+
+
+void executeHazardCheck();
 
 
 
@@ -256,7 +264,9 @@ int main(){
     int_registers[9] = 15;
     */
 
-    int_registers[9] = 1;
+    int_registers[1] = 0;
+
+    //int_registers[3] = 6;
    
 
 
@@ -299,9 +309,13 @@ int main(){
             // 1. Decode (ID)
             decode();
 
-            // 0. Fetch (IF)
-            fetch(instruct_list);
+            if(loadStall == false){
 
+                 // 0. Fetch (IF)
+                fetch(instruct_list);
+
+
+            }
         }
 
 
@@ -323,12 +337,12 @@ int main(){
     
 
 
-
+        loadStall = false;
 
         
 
         // A temporary break so we don't loop forever while testing
-        if (cycle > 25 || activeHalt == true) break; 
+        if (cycle > 8 || activeHalt == true) break; 
     }
 
    
@@ -362,12 +376,7 @@ int main(){
     //should be 204
     cout << "int reg 1: " << int_registers[1] << endl;
 
-    cout << "int reg 2: " << int_registers[2] << endl;
-
     cout << "int reg 3: " << int_registers[3] << endl;
-
-
-    cout << instruct_list[3].wb_exit << endl;
 
 
 
@@ -503,6 +512,8 @@ struct Instruction createInstruction(vector<string>& tokens){
         else if (opcode == "MUL"){
             instr.latency = 3; // 3 cycles for MUL
         }
+
+        instr.regWrite = true;
         
         return instr;
     }
@@ -515,6 +526,8 @@ struct Instruction createInstruction(vector<string>& tokens){
         instr.rd = stoi(tokens[1].substr(1)); // Rd
         instr.rn = stoi(tokens[2].substr(1)); // Rn
         instr.immediate = stoll(tokens[3].substr(1)); // Immediate value
+
+        instr.regWrite = true;
 
         instr.type = InstType::SHIFT_TYPE;
     }
@@ -538,6 +551,8 @@ struct Instruction createInstruction(vector<string>& tokens){
         else if (opcode == "FMULD"){
             instr.latency = 6; // 6 cycles for FMULD
         }
+
+        instr.regWrite = true;
     } 
 
 
@@ -555,6 +570,8 @@ struct Instruction createInstruction(vector<string>& tokens){
         if (opcode == "ADDI" || opcode == "SUBI"){
             instr.latency = 2; // 2 cycles for ADDI and SUBI
         }
+
+        instr.regWrite = true;
     } 
 
 
@@ -568,6 +585,8 @@ struct Instruction createInstruction(vector<string>& tokens){
         instr.shift_amount = stoll(tokens[4]); // Shift amount
 
         instr.type = InstType::IM_TYPE;
+
+        instr.regWrite = true;
         
     } 
 
@@ -585,6 +604,11 @@ struct Instruction createInstruction(vector<string>& tokens){
         if (opcode == "LDURD" || opcode == "STURD"){
             instr.is_fp = true; 
         }
+
+        if (opcode == "LDUR" || opcode == "LDURD"){
+            instr.regWrite = true;
+        }
+       
     }
     
 
@@ -620,7 +644,7 @@ struct Instruction createInstruction(vector<string>& tokens){
         cerr << "Error: Unknown opcode " << opcode << endl;
     }
 
-     return instr; // Return the instruction struct (may be uninitialized if opcode is unknown)
+     return instr;
 }
 
 
@@ -664,6 +688,24 @@ void fetch(vector<Instruction>& program){
 void decode(){
 
     //cout << IF_ID_register.opcode << " is in decode stage" << endl;
+
+    //case for Load data hazard, if intruction ui execute is ldur
+    if (ID_IU1_register.opcode == "LDUR") {
+
+        //check if current instruction need what will be loaded(
+        if(IF_ID_register.rn == ID_IU1_register.rd || IF_ID_register.rm == ID_IU1_register.rd || IF_ID_register.rd == ID_IU1_register.rd){
+
+            //if so stall for a cycle until it moves out, in which it would load the vaue by that point
+            loadStall = true;
+
+            ID_IU1_register = Instruction(); 
+            ID_IU1_register.opcode = "";
+
+            return;
+
+        }
+    }
+
 
     // grab the register values If it's a real instruction or not EMPTY, 
     if (IF_ID_register.opcode != "") {
@@ -724,9 +766,15 @@ void decode(){
         ID_IU1_register.id_exit = cycle;
 
         ID_IU1_register.rd = IF_ID_register.rd;
+        ID_IU1_register.rn = IF_ID_register.rn;
+        ID_IU1_register.rm = IF_ID_register.rm;
+
         ID_IU1_register.latency = IF_ID_register.latency;
         ID_IU1_register.shift_amount = IF_ID_register.shift_amount;
         ID_IU1_register.label = IF_ID_register.label;
+
+        ID_IU1_register.regWrite = IF_ID_register.regWrite;
+         
 
         //update leaving value
         instruct_list[ID_IU1_register.number_id].id_exit = ID_IU1_register.id_exit;
@@ -751,9 +799,11 @@ void execute(){
 
 
     if (ID_IU1_register.opcode != "") {
-
     
         string op = ID_IU1_register.opcode;
+
+        //check for data hazards
+        executeHazardCheck();
 
         // --- LEVEL 3 (IU3) ---
         // MUL finally finishes its 3rd cycle here
@@ -779,20 +829,6 @@ void execute(){
 
             //perform mul operation
             IU3_MEM_register.result = ID_IU1_register.val1 * ID_IU1_register.val2;
-
-            //copy over other info
-               
-            //cycle info
-            IU3_MEM_register.opcode = ID_IU1_register.opcode;
-            IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-            IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-            IU3_MEM_register.ex_exit = cycle;
-            
-
-            IU3_MEM_register.rd = ID_IU1_register.rd;
-
-            IU3_MEM_register.number_id = ID_IU1_register.number_id;
-          
         } 
 
         // --- LEVEL 2 (IU2) ---
@@ -824,23 +860,6 @@ void execute(){
             if (op == "SUB" || op == "SUBI") {
                 IU3_MEM_register.result = ID_IU1_register.val1 - ID_IU1_register.val2;
             }
-
-            cout << "we've done add" << endl;
-
-            //copy over other info
-               
-            //cycle info
-            IU3_MEM_register.opcode = ID_IU1_register.opcode;
-            IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-            IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-            IU3_MEM_register.ex_exit = cycle;
-            
-
-            IU3_MEM_register.rd = ID_IU1_register.rd;
-
-            IU3_MEM_register.number_id = ID_IU1_register.number_id;
-
-
         }
 
 
@@ -868,19 +887,6 @@ void execute(){
 
                 IU3_MEM_register.result = (uint32_t)ID_IU1_register.val1 >> ID_IU1_register.val2;
             }
-
-            //copy over other info
-               
-            //cycle info
-            IU3_MEM_register.opcode = ID_IU1_register.opcode;
-            IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-            IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-            IU3_MEM_register.ex_exit = cycle;
-            
-
-            IU3_MEM_register.rd = ID_IU1_register.rd;
-
-            IU3_MEM_register.number_id = ID_IU1_register.number_id;
         }
 
         //loading and storing
@@ -888,41 +894,12 @@ void execute(){
 
             //calculate immedate address
             IU3_MEM_register.result = ID_IU1_register.val1 + ID_IU1_register.val2;
-
-
-
-            //copy over other info
-               
-            //cycle info
-            IU3_MEM_register.opcode = ID_IU1_register.opcode;
-            IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-            IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-            IU3_MEM_register.ex_exit = cycle;
-            
-
-            IU3_MEM_register.rd = ID_IU1_register.rd;
-
-            IU3_MEM_register.number_id = ID_IU1_register.number_id;
         }
 
         if( op == "MOVZ"){
 
             //shift
             IU3_MEM_register.result = ID_IU1_register.val2 << ID_IU1_register.shift_amount;
-
-            //copy over other info
-               
-            //cycle info
-            IU3_MEM_register.opcode = ID_IU1_register.opcode;
-            IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-            IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-            IU3_MEM_register.ex_exit = cycle;
-            
-
-            IU3_MEM_register.rd = ID_IU1_register.rd;
-
-            IU3_MEM_register.number_id = ID_IU1_register.number_id;
-
         }
 
         if(op == "MOVK"){
@@ -941,19 +918,6 @@ void execute(){
                 IU3_MEM_register.result = ID_IU1_register.val1;
                 cout << "case 2 " << IU3_MEM_register.result << endl;
             }
-
-             //copy over other info
-               
-            //cycle info
-            IU3_MEM_register.opcode = ID_IU1_register.opcode;
-            IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-            IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-            IU3_MEM_register.ex_exit = cycle;
-            
-
-            IU3_MEM_register.rd = ID_IU1_register.rd;
-
-            IU3_MEM_register.number_id = ID_IU1_register.number_id;
         }
 
         if(op == "B"){
@@ -980,8 +944,12 @@ void execute(){
                 
 
                 IU3_MEM_register.rd = ID_IU1_register.rd;
+                IU3_MEM_register.rn = ID_IU1_register.rn;
+                IU3_MEM_register.rm = ID_IU1_register.rm;
+                
 
                 IU3_MEM_register.number_id = ID_IU1_register.number_id;
+                IU3_MEM_register.regWrite = ID_IU1_register.regWrite;
 
                 //Flush past intrucitons
 
@@ -993,6 +961,8 @@ void execute(){
                 //Execute
                 ID_IU1_register = Instruction(); 
                 ID_IU1_register.opcode = "";
+
+                return;
             } 
             else {
                 cerr << "Error: Label '" << IU3_MEM_register.label << "' not found!" << endl;
@@ -1026,8 +996,12 @@ void execute(){
                     IU3_MEM_register.ex_exit = cycle;
                     
                     IU3_MEM_register.rd = ID_IU1_register.rd;
+                    IU3_MEM_register.rn = ID_IU1_register.rn;
+                    IU3_MEM_register.rm = ID_IU1_register.rm;
+                
 
                     IU3_MEM_register.number_id = ID_IU1_register.number_id;
+                    IU3_MEM_register.regWrite = ID_IU1_register.regWrite;
 
                     //Flush past intrucitons
 
@@ -1040,38 +1014,40 @@ void execute(){
                     ID_IU1_register = Instruction(); 
                     ID_IU1_register.opcode = "";
 
+                    return;
+
                 }
 
                 //dont banch but keep moving
                 else{
                     cout << "branch is not taken" << endl;
 
-                     //copy over other info
-                    
-                    //cycle info
-                    IU3_MEM_register.opcode = ID_IU1_register.opcode;
-                    IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-                    IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-                    IU3_MEM_register.ex_exit = cycle;
-                    
-                    IU3_MEM_register.rd = ID_IU1_register.rd;
-
-                    IU3_MEM_register.number_id = ID_IU1_register.number_id;
-                }
-
-
-
- 
+                } 
             } 
             else {
                 cerr << "Error: Label '" << IU3_MEM_register.label << "' not found!" << endl;
             }
 
         }
+        //copy over other info
+                    
+        //cycle info
+        IU3_MEM_register.opcode = ID_IU1_register.opcode;
+        IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
+        IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
+        IU3_MEM_register.ex_exit = cycle;
+                    
+        IU3_MEM_register.rd = ID_IU1_register.rd;
+        IU3_MEM_register.rn = ID_IU1_register.rn;
+        IU3_MEM_register.rm = ID_IU1_register.rm;
+                
+
+        IU3_MEM_register.number_id = ID_IU1_register.number_id;
+
+        IU3_MEM_register.regWrite = ID_IU1_register.regWrite;
+        
 
         instruct_list[IU3_MEM_register.number_id].ex_exit = IU3_MEM_register.ex_exit;
-
-    
     }
 
 
@@ -1095,64 +1071,48 @@ void memory(){
 
         if (op == "LDUR") {
 
+            cout << "dm index is" <<  IU3_MEM_register.result << endl;
+
             // Read from memory into the result field
             MEM_WB_register.result = data_memory[IU3_MEM_register.result];
-
-           
-
-            //copy relevant information
-            MEM_WB_register.opcode = IU3_MEM_register.opcode;
-            MEM_WB_register.if_exit = IU3_MEM_register.if_exit;
-            MEM_WB_register.id_exit = IU3_MEM_register.id_exit;
-            MEM_WB_register.ex_exit = IU3_MEM_register.ex_exit;
-            MEM_WB_register.mem_exit = cycle;
-
-            MEM_WB_register.rd = IU3_MEM_register.rd;
-
-            MEM_WB_register.number_id = IU3_MEM_register.number_id;
+            
+            cout << "reading " << MEM_WB_register.result << " from data memory" << endl;
         } 
         else if (op == "STUR") {
 
             // Write the value of the source register into memory
             data_memory[IU3_MEM_register.result] = int_registers[IU3_MEM_register.rd];
 
-
-            //copy relevant information
-            MEM_WB_register.opcode = IU3_MEM_register.opcode;
-            MEM_WB_register.if_exit = IU3_MEM_register.if_exit;
-            MEM_WB_register.id_exit = IU3_MEM_register.id_exit;
-            MEM_WB_register.ex_exit = IU3_MEM_register.ex_exit;
-            MEM_WB_register.mem_exit = cycle;
-
-            MEM_WB_register.rd = IU3_MEM_register.rd;
-
-            MEM_WB_register.number_id = IU3_MEM_register.number_id;
         }
-        else{
+      
 
          
 
-            //copy relevant information
-            MEM_WB_register.opcode = IU3_MEM_register.opcode;
-            MEM_WB_register.if_exit = IU3_MEM_register.if_exit;
-            MEM_WB_register.id_exit = IU3_MEM_register.id_exit;
-            MEM_WB_register.ex_exit = IU3_MEM_register.ex_exit;
-            MEM_WB_register.mem_exit = cycle;
+        //copy relevant information
+        MEM_WB_register.opcode = IU3_MEM_register.opcode;
+        MEM_WB_register.if_exit = IU3_MEM_register.if_exit;
+        MEM_WB_register.id_exit = IU3_MEM_register.id_exit;
+        MEM_WB_register.ex_exit = IU3_MEM_register.ex_exit;
+        MEM_WB_register.mem_exit = cycle;
 
-            MEM_WB_register.rd = IU3_MEM_register.rd;
+        MEM_WB_register.rd = IU3_MEM_register.rd;
 
-            MEM_WB_register.number_id = IU3_MEM_register.number_id;
+        MEM_WB_register.number_id = IU3_MEM_register.number_id;
+
+        //dont overwrite saved value
+        if (op != "LDUR") {
 
             MEM_WB_register.result = IU3_MEM_register.result;
-            cout <<  MEM_WB_register.result << endl;
-            cout <<  MEM_WB_register.rd << endl;
-  
-
 
         }
 
-        instruct_list[MEM_WB_register.number_id].mem_exit = MEM_WB_register.mem_exit;
+        MEM_WB_register.regWrite = IU3_MEM_register.regWrite; 
 
+        cout <<  MEM_WB_register.result << endl;
+        cout <<  MEM_WB_register.rd << endl;
+        
+
+        instruct_list[MEM_WB_register.number_id].mem_exit = MEM_WB_register.mem_exit;
     }
     else{
 
@@ -1183,24 +1143,6 @@ void writeBack() {
                 MEM_WB_register.wb_exit = cycle;
                 int_registers[MEM_WB_register.rd] = MEM_WB_register.result;
 
-
-
-                //update instruction in orignal list             
-                cout << " update" << endl;
-                /*
-                instruct_list[MEM_WB_register.number_id].if_exit = MEM_WB_register.if_exit;
-                instruct_list[MEM_WB_register.number_id].id_exit = MEM_WB_register.id_exit;
-                instruct_list[MEM_WB_register.number_id].ex_exit = MEM_WB_register.ex_exit;
-                instruct_list[MEM_WB_register.number_id].mem_exit = MEM_WB_register.mem_exit;
-                instruct_list[MEM_WB_register.number_id].wb_exit = MEM_WB_register.wb_exit;
-                */
-
-                /*
-                //remove after writing for safety
-                MEM_WB_register = Instruction(); 
-                MEM_WB_register.opcode = "";
-                */
-
             }
         }
 
@@ -1208,20 +1150,6 @@ void writeBack() {
         if (op == "STUR" || op == "B" || op == "CBZ" || op == "CBNZ"){
 
             MEM_WB_register.wb_exit = cycle;
-            /*
-            instruct_list[MEM_WB_register.number_id].if_exit = MEM_WB_register.if_exit;
-            instruct_list[MEM_WB_register.number_id].id_exit = MEM_WB_register.id_exit;
-            instruct_list[MEM_WB_register.number_id].ex_exit = MEM_WB_register.ex_exit;
-            instruct_list[MEM_WB_register.number_id].mem_exit = MEM_WB_register.mem_exit;
-            instruct_list[MEM_WB_register.number_id].wb_exit = MEM_WB_register.wb_exit;
-            */
-
-            /*
-                //remove after writing for safety
-                MEM_WB_register = Instruction(); 
-                MEM_WB_register.opcode = "";
-
-            */
 
         }
 
@@ -1238,28 +1166,6 @@ void writeBack() {
 
                 MEM_WB_register.wb_exit = cycle;
                 int_registers[MEM_WB_register.rd] = MEM_WB_register.result;
-                
-
-            
-                //update instruction in orignal list 
-            
-                cout << " update" << endl;
-                /*
-                instruct_list[MEM_WB_register.number_id].if_exit = MEM_WB_register.if_exit;
-                instruct_list[MEM_WB_register.number_id].id_exit = MEM_WB_register.id_exit;
-                instruct_list[MEM_WB_register.number_id].ex_exit = MEM_WB_register.ex_exit;
-                instruct_list[MEM_WB_register.number_id].mem_exit = MEM_WB_register.mem_exit;
-                instruct_list[MEM_WB_register.number_id].wb_exit = MEM_WB_register.wb_exit;
-                */
-               
-                /*
-                
-                //remove after writing for safety
-                MEM_WB_register = Instruction(); 
-                MEM_WB_register.opcode = "";
-
-                */
-                
                 
             }
         }
@@ -1446,3 +1352,115 @@ void printExits(Instruction instruct){
 
 
 
+void executeHazardCheck(){
+
+    string op = ID_IU1_register.opcode;
+
+    cout << "EX is looking for R" << ID_IU1_register.rn << endl;
+    cout << "IU3_MEM contains R" << IU3_MEM_register.rd << endl;
+    cout << "MEM_WB contains R" << MEM_WB_register.rd << endl;
+
+    //R[Rd] = R[Rn] + R[Rm]
+    if(op == "ADD" || op == "MUL" || op == "SUB" || op == "AND" || op == "ORR"){
+        
+        //Check Rn (Source 1) 
+
+        //EX/MEM hazard
+        if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rn) {
+
+            cout << " c1" << endl;
+            cout << endl;
+
+            ID_IU1_register.val1 = IU3_MEM_register.result;
+
+        }
+
+        //MEM/WB hazard
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_IU1_register.rn) {
+
+              cout << " c2" << endl;
+              cout << endl;
+
+            ID_IU1_register.val1 = MEM_WB_register.result;
+        }
+        
+        //Check Rm (Source 2).
+        //EX/MEM hazard
+        if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rm) {
+
+            ID_IU1_register.val2 = IU3_MEM_register.result;
+
+        }
+
+        //MEM/WB hazard
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_IU1_register.rm) {
+
+            ID_IU1_register.val2 = MEM_WB_register.result;
+        }
+    }
+
+    if(op == "ADDI" || op == "SUBI" || op == "ANDI" ||  op == "ORRI" || op == "LSL" || op == "LSR" || op == "LDUR"){
+
+        //Check only Rn. (The second operand is an immediate, so it can't have a data hazard).
+        //EX/MEM hazard
+        if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rn) {
+
+            cout << "cond1" << endl;
+
+            ID_IU1_register.val1 = IU3_MEM_register.result;
+
+        }
+
+        //MEM/WB hazard
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_IU1_register.rn) {
+
+            cout << "cond2" << endl;
+
+            ID_IU1_register.val1 = MEM_WB_register.result;
+        }
+
+    }
+
+    if (op == "STUR"){
+
+        /*
+
+        //Check Rn (Base address) 
+        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_IU1_register.rn) {
+            final_Rn = EX_MEM_register.alu_result;
+        }
+        else if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rn) {
+            // If the previous instruction was a Load, grab its memory data, otherwise its ALU result
+            final_Rn = (IU3_MEM_register.opcode == "LDUR") ? IU3_MEM_register.mem_data : IU3_MEM_register.alu_result;
+        }
+        else {
+            final_Rn = ID_IU1_register.val_rn;
+        }
+        
+        
+        //Check Rt (The data being stored is a source here!).
+        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_IU1_register.rt) {
+        final_Rt = EX_MEM_register.alu_result;
+        }
+        else if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rt) {
+            final_Rt = (IU3_MEM_register.opcode == "LDUR") ? IU3_MEM_register.mem_data : IU3_MEM_register.alu_result;
+        }
+
+        */
+
+
+    }
+
+
+    if (op == "CBZ" || op == "CBNZ"){
+
+        //Check Rt. (This is the register being compared to zero).
+
+    } 
+
+    if (op == "MOVK"){
+
+        //Check Rd. Since MOVK keeps the other bits of the register, the current value of Rd is actually a source!
+
+    }
+}
