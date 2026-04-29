@@ -74,7 +74,8 @@ struct Instruction {
 
     // Execution State
     int latency = 1;         // IU/FP latency
-    int cyclesRemaining = 0; // For multi-cycle EX
+
+    int cyclesRemaining = 0; 
     long long intResult = 0;
     double fpResult = 0.0;
 
@@ -97,7 +98,13 @@ struct Instruction {
     int number_id = -1;
 
 
+
+
+    long long result_data = 0;
+
+
     //helper flags
+
 
     //helps if it uses r or d registers
     bool is_fp = false; // True for LDURD/STURD (needs 2 memory cycles)
@@ -132,36 +139,7 @@ bool memory_busy_with_dcache = false;
 // Statistics
 int icache_accesses = 0;
 
-struct DCacheBlock {
-    bool valid = false;
-    bool dirty = false;
-    uint32_t tag = 0;
-    uint32_t words[4];
-    int lru_bit = 0; // For 2-way, a simple 0 or 1 is enough to track "Last Used"
-};
 
-DCacheBlock d_cache[2][2];
-
-struct DCacheParts {
-    uint32_t tag;
-    uint32_t index;
-    uint32_t wordOffset;
-};
-
-DCacheParts splitDCache(uint32_t addr) {
-    DCacheParts p;
-    // Bits 0-1: Byte Offset (ignored)
-    // Bits 2-3: Word Offset (same as I-Cache)
-    p.wordOffset = (addr >> 2) & 0x3; 
-    
-    // Bit 4: Index (chooses Set 0 or Set 1)
-    p.index = (addr >> 4) & 0x1;      
-    
-    // Bits 5-31: Tag
-    p.tag = (addr >> 5);              
-    
-    return p;
-}
 
 
 
@@ -178,7 +156,20 @@ int dcache_hits = 0, dcache_misses = 0;
 int d_req = 0;
 int d_hit = 0;
 
+int memory_bus_busy_until = 0; // The "Shared Bus" clock
 
+struct DCacheLine {
+    bool valid = false;
+    bool dirty = false;
+    int tag = -1;
+    int lru_counter = 0; // For LRU replacement
+};
+
+// 2 sets, 2 ways per set = 4 blocks total
+DCacheLine d_cache[2][2]; 
+
+
+int dcache_stall_cycles = 0;
 
 
 
@@ -191,14 +182,22 @@ map<string, int> labels = {
     };
 
 //store instructions in cycle, keep count with PC and cycle count
+
+//States
+
+
+//Pipeline registers
 Instruction IF_ID_register;
-Instruction ID_IU1_register;
-Instruction IU1_IU2_register;
-Instruction IU2_IU3_register;
-Instruction IU3_MEM_register;
+Instruction ID_EX_register;
+Instruction EX_MEM_register;
 Instruction MEM_WB_register;
 
 Instruction post_WB_register_info;
+
+bool instruciton_fetched = false;
+Instruction fetched_instruction;
+
+
 
 
 
@@ -266,6 +265,8 @@ void printExits(Instruction instruct);
 
 
 void executeHazardCheck();
+
+void moveRegisters();
 
 
 
@@ -341,11 +342,14 @@ int main(){
     int_registers[9] = 15;
     */
 
-    int_registers[1] = 0;
+    // R2 points to address 0 (index 0 in data_memory)
+    int_registers[2] = 0; 
 
-    //int_registers[3] = 6;
-   
+    // R4 points to address 4 (index 1 in data_memory)
+    int_registers[4] = 4; 
 
+    // Clear R3 to ensure we aren't using a "lucky" old value
+    int_registers[3] = 0;
 
 
 
@@ -369,35 +373,69 @@ int main(){
 
         cycle++;
 
+        executeHazardCheck();
+
         //backwards to 
         // 3. Writeback (WB)
         writeBack();
 
         //Move IU instuction once each stage
-        //MEM_WB_register  = IU3_MEM_register;
+        //MEM_WB_register  = EX_MEM_register;
 
         // 3. Memory (MEM)
         memory();
+        
 
+        //dont move if d cache is stalling
+        //if (dcache_stall_cycles == 0) {
+
+        
         // 2. Execute (EX)
         execute();
+        
 
-        if (busy_iu == false){
-            // 1. Decode (ID)
-            decode();
+        //if (busy_iu == false){
 
-            if(loadStall == false){
+  
+        // 1. Decode (ID)
+        decode();    
+                
+    
+        // 0. Fetch (IF)
 
-                 // 0. Fetch (IF)
-                fetch(instruct_list);
-
-
-            }
+        //fetch if nothing has been fetched yet
+        if(IF_ID_register.opcode == ""){
+            fetch(instruct_list);
         }
+       
+        
+        cout << "ex latency " << ID_EX_register.latency << endl;
+
+        
+
+        moveRegisters();
+
+
+
+
+        if (dcache_stall_cycles > 0) dcache_stall_cycles--;
+        if (icache_miss_delay > 0) icache_miss_delay--;
+   
+        //decrease stall count of a instruciton that takes long in execute by 1
+        if(ID_EX_register.latency > 0) ID_EX_register.latency--;
+
+
+
+
+        cout << "Cycle: " << cycle 
+        << " | dcache_stall: " << dcache_stall_cycles 
+        << " | busy_iu: " << busy_iu 
+        << " | loadStall: " << loadStall << endl;
+        cout << "DEBUG: PC=" << PC  << endl;
 
     // 2. Termination Logic:
     // We stop when the second HLT fetch (the "ghost" fetch) finishes its miss
-    if (final_hlt_fetch_started && icache_miss_delay == 0) {
+    if (activeHalt && icache_miss_delay == 0) {
         break;
     }
 
@@ -422,10 +460,18 @@ int main(){
 
         loadStall = false;
 
+        cout << "IF.ID op " << IF_ID_register.opcode << endl;
+        cout << "ID.EX op " << ID_EX_register.opcode << endl;
+        cout << "EX.MEM op " << EX_MEM_register.opcode << endl;
+        cout << "MEM.WB op " << MEM_WB_register.opcode << endl;
+        cout  << endl;
+        cout  << endl;
+
+
         
 
         // A temporary break so we don't loop forever while testing
-        if (cycle > 30 || activeHalt == true) break; 
+        if (cycle > 100 || activeHalt == true) break; 
     }
 
    
@@ -457,9 +503,12 @@ int main(){
     */
 
     //should be 204
-    cout << "int reg 1: " << int_registers[1] << endl;
+    cout << "int reg 0: " << int_registers[0] << endl;
 
-    cout << "int reg 3: " << int_registers[3] << endl;
+    cout << "int reg 2: " << int_registers[2] << endl;
+    cout << "int reg 4: " << int_registers[4] << endl;
+
+    cout << "data mem 0 " << data_memory[0] << endl;
 
 
 
@@ -744,72 +793,49 @@ bool checkOpcode(string opcode, vector<string> type_vector){
 //look at the PC, grab the current instruction from the instruction vector, put it into the IF_ID_register.
 void fetch(vector<Instruction>& program){
 
-    // A: Handle active stalls
-    if (icache_miss_delay > 0) {
-        icache_miss_delay--;
+    //Handle active stalls
+    if (icache_miss_delay > 0 || activeHalt) {
+        
         return; 
     }
 
-    // If the PC is within the bounds of our instruction vector
+    // If the PC is within the bounds of instruction vector
     if (PC / 4 < program.size()) {
         ICacheParts p = splitICache(PC);
         i_req++;
 
 
         if (i_cache[p.index].valid && i_cache[p.index].tag == p.tag) {
-            // CACHE HIT - Only here do we move the PC and record the exit
+
+            // cache hit: -  move the PC 
             i_hit++;
 
-            IF_ID_register = program[PC / 4];
-
-            IF_ID_register.if_exit = cycle;
-
-            //update leaving value
-            instruct_list[IF_ID_register.number_id].if_exit = IF_ID_register.if_exit;
+         
+            //start to load IF ID Loaded on success
+            fetched_instruction = program[PC / 4];
+            instruciton_fetched = true;
 
             // Move to the next instruction address
             PC += 4; 
         } 
     
         else {
+            // MISS: Check if the bus is free, claim if so
+            if (cycle >= memory_bus_busy_until) {
 
-            // CACHE MISS - Start 12 cycle wait. Do NOT increment PC.
-            icache_miss_delay = 11; // 12 cycles total including this one
-            i_cache[p.index].valid = true;
-            i_cache[p.index].tag = p.tag;
-            // The function returns, and next cycle it will check the delay again.
+                // CACHE MISS - Start 12 cycle wait. Do NOT increment PC.
+                icache_miss_delay = 11; // 12 cycles total including this one
+                i_cache[p.index].valid = true;
+                i_cache[p.index].tag = p.tag;
+                // The function returns, and next cycle it will check the delay again.
+            }
         }
-    }
-    else if (!final_hlt_fetch_started) {
-        i_req++;
-        icache_miss_delay = 11; 
-        final_hlt_fetch_started = true;
     }
 }
 
 
-//look up values in register file, put them in the ID_IU1_register for the next stage
+//look up values in register file, put them in the ID_EX_register for the next stage
 void decode(){
-
-    //cout << IF_ID_register.opcode << " is in decode stage" << endl;
-
-    //case for Load data hazard, if intruction ui execute is ldur
-    if (ID_IU1_register.opcode == "LDUR") {
-
-        //check if current instruction need what will be loaded(
-        if(IF_ID_register.rn == ID_IU1_register.rd || IF_ID_register.rm == ID_IU1_register.rd || IF_ID_register.rd == ID_IU1_register.rd){
-
-            //if so stall for a cycle until it moves out, in which it would load the vaue by that point
-            loadStall = true;
-
-            ID_IU1_register = Instruction(); 
-            ID_IU1_register.opcode = "";
-
-            return;
-
-        }
-    }
-
 
     // grab the register values If it's a real instruction or not EMPTY, 
     if (IF_ID_register.opcode != "") {
@@ -817,152 +843,113 @@ void decode(){
         if(IF_ID_register.opcode == "HLT"){
             cout << "detecting halt operation" << endl;
 
-            ID_IU1_register.id_exit = cycle;
+            IF_ID_register.id_exit = cycle;
 
             activeHalt = true;
         }
 
-        ID_IU1_register.opcode = IF_ID_register.opcode;
-        ID_IU1_register.number_id = IF_ID_register.number_id;
+        string op = IF_ID_register.opcode;
 
         // Read the first source register value
 
         // XZR should always return 0
         if (IF_ID_register.rn == 31) {
-            ID_IU1_register.val1 = 0;
+            IF_ID_register.val1 = 0;
         }
 
-        else if(ID_IU1_register.opcode == "MOVK"){
-             ID_IU1_register.val1 = int_registers[IF_ID_register.rd];
+        else if(IF_ID_register.opcode == "MOVK"){
+             IF_ID_register.val1 = int_registers[IF_ID_register.rd];
 
         }
 
         else{
             // Example: If the instruction uses 'rn' (first source register)
             // We look up its value in our physical register array      
-           ID_IU1_register.val1 = int_registers[IF_ID_register.rn];
+           IF_ID_register.val1 = int_registers[IF_ID_register.rn];
         }
          //Second source register or immediate value
 
          // For ADDI or SUBI, use immediate is already in struct.
-        if (IF_ID_register.opcode == "ADDI" || IF_ID_register.opcode == "SUBI" || 
-            IF_ID_register.opcode == "LDUR" || IF_ID_register.opcode == "STUR" ||
-            IF_ID_register.opcode == "LSL" || IF_ID_register.opcode == "LSR" ||
-            IF_ID_register.opcode == "ANDI" || IF_ID_register.opcode == "ORRI" ||
-            IF_ID_register.opcode == "MOVZ" || IF_ID_register.opcode == "MOVK") {
+        if (op == "ADDI" || op == "SUBI" || op == "LDUR" || op == "STUR" ||
+            op == "LSL" || op == "LSR" || op == "ANDI" || op == "ORRI" ||
+           op == "MOVZ" || op == "MOVK") {
                 
-            ID_IU1_register.val2 = IF_ID_register.immediate;
+            IF_ID_register.val2 = IF_ID_register.immediate;
         }
 
         else if (IF_ID_register.rn == 31) {
-            ID_IU1_register.val2 = 0;
+            IF_ID_register.val2 = 0;
         }
 
         else{
-            ID_IU1_register.val2 = int_registers[IF_ID_register.rm];
+            IF_ID_register.val2 = int_registers[IF_ID_register.rm];
         }
 
-
-
-        
-        ID_IU1_register.if_exit = IF_ID_register.if_exit;
-        ID_IU1_register.id_exit = cycle;
-
-        ID_IU1_register.rd = IF_ID_register.rd;
-        ID_IU1_register.rn = IF_ID_register.rn;
-        ID_IU1_register.rm = IF_ID_register.rm;
-
-        ID_IU1_register.latency = IF_ID_register.latency;
-        ID_IU1_register.shift_amount = IF_ID_register.shift_amount;
-        ID_IU1_register.label = IF_ID_register.label;
-
-        ID_IU1_register.regWrite = IF_ID_register.regWrite;
-         
-
-        //update leaving value
-        instruct_list[ID_IU1_register.number_id].id_exit = ID_IU1_register.id_exit;
-
-
-
-    }
-    else{
-        // If we ran out of instructions, put an "Empty" one in the register
-        ID_IU1_register = Instruction(); 
-        ID_IU1_register.opcode = "";
+        //get stur value now for later use
+        if (op == "STUR") {
+            IF_ID_register.result_data = int_registers[IF_ID_register.rd];
+        }
     }
 }
 
 
 void execute(){
-    // IU1 reads from the register filled by Decode
 
-    //move 
+    if (ID_EX_register.latency > 0) return;
 
-    //check cases where ADD/SUB take longer in pipeline
-
-
-    if (ID_IU1_register.opcode != "") {
+    if (ID_EX_register.opcode != "") {
     
-        string op = ID_IU1_register.opcode;
+        string op = ID_EX_register.opcode;
 
         //check for data hazards
-        executeHazardCheck();
+        
 
         // --- LEVEL 3 (IU3) ---
         // MUL finally finishes its 3rd cycle here
         if (op == "MUL") {
 
             cout << "we are stalling " << op << endl;
-            cout << ID_IU1_register.latency << endl;
+            cout << ID_EX_register.latency << endl;
 
             //check it for latency, if not ready stall 
-            if(ID_IU1_register.latency > 1){
+            if(ID_EX_register.latency > 0){
 
-                busy_iu = true;
-                ID_IU1_register.latency -= 1;
-
-                //pass empty intruciton foward while stalling
-                IU3_MEM_register = Instruction(); 
-                IU3_MEM_register.opcode = "";
                 return;
-            }
-            else{
-                busy_iu = false;
             }
 
             //perform mul operation
-            IU3_MEM_register.result = ID_IU1_register.val1 * ID_IU1_register.val2;
+            ID_EX_register.result = ID_EX_register.val1 * ID_EX_register.val2;
         } 
 
         // --- LEVEL 2 (IU2) ---
         else if (op == "ADD" || op == "ADDI" || op == "SUB" || op == "SUBI"){
 
             cout << "we are stalling " << op << endl;
-            cout << ID_IU1_register.latency << endl;
+            cout << ID_EX_register.latency << endl;
 
             //check it for latency, if not ready stall 
-            if(ID_IU1_register.latency > 1){
+            if(ID_EX_register.latency > 0){
 
-                busy_iu = true;
-                ID_IU1_register.latency -= 1;
 
-                //pass empty intruciton foward while stalling
-                IU3_MEM_register = Instruction(); 
-                IU3_MEM_register.opcode = "";
+                cout << "returned" << endl;
                 return;
             }
+
             else{
-                busy_iu = false;
+
             }
 
 
             // ADD and SUB finish their 2nd cycle here
             if (op == "ADD" || op == "ADDI") {
-                IU3_MEM_register.result = ID_IU1_register.val1 + ID_IU1_register.val2;
+                ID_EX_register.result = ID_EX_register.val1 + ID_EX_register.val2;
+                cout << "did math" << endl;
                 } 
             if (op == "SUB" || op == "SUBI") {
-                IU3_MEM_register.result = ID_IU1_register.val1 - ID_IU1_register.val2;
+                ID_EX_register.result = ID_EX_register.val1 - ID_EX_register.val2;
             }
+
+            return;
         }
 
 
@@ -972,54 +959,62 @@ void execute(){
 
             if (op == "AND" || op == "ANDI") {
 
-                IU3_MEM_register.result = ID_IU1_register.val1 & ID_IU1_register.val2;
+                ID_EX_register.result = ID_EX_register.val1 & ID_EX_register.val2;
             }
 
             else if (op == "ORR" || op == "ORRI") {
 
-                IU3_MEM_register.result = ID_IU1_register.val1 | ID_IU1_register.val2;
+                ID_EX_register.result = ID_EX_register.val1 | ID_EX_register.val2;
             }
 
             // Shifts (LSL/LSR)
             else if (op == "LSL") {
 
-                IU3_MEM_register.result = (uint32_t)ID_IU1_register.val1 << ID_IU1_register.val2;
+                ID_EX_register.result = (uint32_t)ID_EX_register.val1 << ID_EX_register.val2;
+
+                cout << "finished calc" << endl;
+
+                cout <<  "v1 " << ID_EX_register.val1 << "v2 " << ID_EX_register.val2 << endl;
             }
 
             else if (op == "LSR") {
 
-                IU3_MEM_register.result = (uint32_t)ID_IU1_register.val1 >> ID_IU1_register.val2;
+                ID_EX_register.result = (uint32_t)ID_EX_register.val1 >> ID_EX_register.val2;
             }
         }
 
         //loading and storing
         if (op == "LDUR" || op == "STUR"){
 
+            if (ID_EX_register.latency > 0) {
+                return; 
+            }
+
             //calculate immedate address
-            IU3_MEM_register.result = ID_IU1_register.val1 + ID_IU1_register.val2;
+            ID_EX_register.result = ID_EX_register.val1 + ID_EX_register.val2;
         }
 
         if( op == "MOVZ"){
 
             //shift
-            IU3_MEM_register.result = ID_IU1_register.val2 << ID_IU1_register.shift_amount;
+            ID_EX_register.result = ID_EX_register.val2 << ID_EX_register.shift_amount;
         }
 
         if(op == "MOVK"){
 
-            uint32_t shift = ID_IU1_register.shift_amount * 16;
-            uint32_t immediate = ID_IU1_register.val2;
-            uint32_t currentVal1 = ID_IU1_register.val1;
+            uint32_t shift = ID_EX_register.shift_amount * 16;
+            uint32_t immediate = ID_EX_register.val2;
+            uint32_t currentVal1 = ID_EX_register.val1;
 
 
             if (shift < 32) {
                 uint32_t mask = ~(0xFFFF << shift);
-                IU3_MEM_register.result = (currentVal1 & mask) | (immediate << shift);
-                cout << "case 1 " << IU3_MEM_register.result << endl;
+                ID_EX_register.result = (currentVal1 & mask) | (immediate << shift);
+                cout << "case 1 " << ID_EX_register.result << endl;
             } else {
                 // If shift is 32 or more, we keep the whole thing as shift is out of bounds
-                IU3_MEM_register.result = ID_IU1_register.val1;
-                cout << "case 2 " << IU3_MEM_register.result << endl;
+                ID_EX_register.result = ID_EX_register.val1;
+                cout << "case 2 " << ID_EX_register.result << endl;
             }
         }
 
@@ -1027,97 +1022,61 @@ void execute(){
 
             // 2. Look up the line number in your Map
             // labels["LOOP"] would return something like line 5
-            if (labels.find(ID_IU1_register.label) != labels.end()) {
-                int targetLine = labels[ID_IU1_register.label];
+            if (labels.find(ID_EX_register.label) != labels.end()) {
+                int targetLine = labels[ID_EX_register.label];
 
                 cout << "targetLine is " << targetLine << endl;
 
                 //Update the PC to that line
                 PC = targetLine*4 - 4;
 
-                cout << "Branching to LABEL: " << ID_IU1_register.label << " at line " << targetLine << endl;
+                cout << "Branching to LABEL: " << ID_EX_register.label << " at line " << targetLine << endl;
 
                 //copy over other info
-                
-                //cycle info
-                IU3_MEM_register.opcode = ID_IU1_register.opcode;
-                IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-                IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-                IU3_MEM_register.ex_exit = cycle;
-                
-
-                IU3_MEM_register.rd = ID_IU1_register.rd;
-                IU3_MEM_register.rn = ID_IU1_register.rn;
-                IU3_MEM_register.rm = ID_IU1_register.rm;
-                
-
-                IU3_MEM_register.number_id = ID_IU1_register.number_id;
-                IU3_MEM_register.regWrite = ID_IU1_register.regWrite;
-
+    
                 //Flush past intrucitons
 
+                //Initial fetched instruction
+                fetched_instruction = Instruction(); 
+                fetched_instruction.opcode = "";
 
-                //Fetch
+            
+                //Decode
                 IF_ID_register = Instruction(); 
                 IF_ID_register.opcode = "";
 
-                //Execute
-                ID_IU1_register = Instruction(); 
-                ID_IU1_register.opcode = "";
-
                 return;
+                
             } 
             else {
-                cerr << "Error: Label '" << IU3_MEM_register.label << "' not found!" << endl;
+                cerr << "Error: Label '" << ID_EX_register.label << "' not found!" << endl;
             }
         }
         if(op == "CBZ" || op == "CBNZ"){
 
             // 2. Look up the line number in your Map
             // labels["LOOP"] would return something like line 5
-            if (labels.find(ID_IU1_register.label) != labels.end()) {
-                int targetLine = labels[ID_IU1_register.label];
+            if (labels.find(ID_EX_register.label) != labels.end()) {
+                int targetLine = labels[ID_EX_register.label];
 
                 cout << "targetLine is " << targetLine << endl;
 
                 //CBZ jump if zero
                 //CBNZ jump if not zero
-                if( (op == "CBZ" && ID_IU1_register.val1 == 0) || (op == "CBNZ" && ID_IU1_register.val1 != 0)){
-
-                    //Update the PC to that line
-                    PC = targetLine*4 - 4;
-                 
-
-                    cout << "Branching to LABEL: " << ID_IU1_register.label << " at line " << targetLine << endl;
-
-                    //copy over other info
-                    
-                    //cycle info
-                    IU3_MEM_register.opcode = ID_IU1_register.opcode;
-                    IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-                    IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-                    IU3_MEM_register.ex_exit = cycle;
-                    
-                    IU3_MEM_register.rd = ID_IU1_register.rd;
-                    IU3_MEM_register.rn = ID_IU1_register.rn;
-                    IU3_MEM_register.rm = ID_IU1_register.rm;
-                
-
-                    IU3_MEM_register.number_id = ID_IU1_register.number_id;
-                    IU3_MEM_register.regWrite = ID_IU1_register.regWrite;
+                if( (op == "CBZ" && ID_EX_register.val1 == 0) || (op == "CBNZ" && ID_EX_register.val1 != 0)){
 
                     //Flush past intrucitons
 
+                    //Initial fetched instruction
+                    fetched_instruction = Instruction(); 
+                    fetched_instruction.opcode = "";
 
-                    //Fetch
+                
+                    //Decode
                     IF_ID_register = Instruction(); 
                     IF_ID_register.opcode = "";
 
-                    //Execute
-                    ID_IU1_register = Instruction(); 
-                    ID_IU1_register.opcode = "";
-
-                    return;
+                return;
 
                 }
 
@@ -1128,100 +1087,109 @@ void execute(){
                 } 
             } 
             else {
-                cerr << "Error: Label '" << IU3_MEM_register.label << "' not found!" << endl;
+                cerr << "Error: Label '" << ID_EX_register.label << "' not found!" << endl;
             }
 
         }
-        //copy over other info
-                    
-        //cycle info
-        IU3_MEM_register.opcode = ID_IU1_register.opcode;
-        IU3_MEM_register.if_exit = ID_IU1_register.if_exit;
-        IU3_MEM_register.id_exit = ID_IU1_register.id_exit;
-        IU3_MEM_register.ex_exit = cycle;
-                    
-        IU3_MEM_register.rd = ID_IU1_register.rd;
-        IU3_MEM_register.rn = ID_IU1_register.rn;
-        IU3_MEM_register.rm = ID_IU1_register.rm;
-                
-
-        IU3_MEM_register.number_id = ID_IU1_register.number_id;
-
-        IU3_MEM_register.regWrite = ID_IU1_register.regWrite;
-        
-
-        instruct_list[IU3_MEM_register.number_id].ex_exit = IU3_MEM_register.ex_exit;
     }
-
-
-    else{
-    
-        IU3_MEM_register = Instruction(); 
-        IU3_MEM_register.opcode = "";
-
-    }
-    
-
 }
 
 void memory(){
 
-   // MEM works on the instruction in the IU3_MEM register
-    if (IU3_MEM_register.opcode != "") {
-        
-        string op = IU3_MEM_register.opcode;
-        //int address = IU3_MEM_register.result; // The address calculated in EX
 
-        if (op == "LDUR") {
+    //if stalling if cycles havent ran out yet
+    if (dcache_stall_cycles > 0) {
 
-            cout << "dm index is" <<  IU3_MEM_register.result << endl;
-
-            // Read from memory into the result field
-            MEM_WB_register.result = data_memory[IU3_MEM_register.result];
-            
-            cout << "reading " << MEM_WB_register.result << " from data memory" << endl;
-        } 
-        else if (op == "STUR") {
-
-            // Write the value of the source register into memory
-            data_memory[IU3_MEM_register.result] = int_registers[IU3_MEM_register.rd];
-
-        }
-      
-
-         
-
-        //copy relevant information
-        MEM_WB_register.opcode = IU3_MEM_register.opcode;
-        MEM_WB_register.if_exit = IU3_MEM_register.if_exit;
-        MEM_WB_register.id_exit = IU3_MEM_register.id_exit;
-        MEM_WB_register.ex_exit = IU3_MEM_register.ex_exit;
-        MEM_WB_register.mem_exit = cycle;
-
-        MEM_WB_register.rd = IU3_MEM_register.rd;
-
-        MEM_WB_register.number_id = IU3_MEM_register.number_id;
-
-        //dont overwrite saved value
-        if (op != "LDUR") {
-
-            MEM_WB_register.result = IU3_MEM_register.result;
-
-        }
-
-        MEM_WB_register.regWrite = IU3_MEM_register.regWrite; 
-
-        cout <<  MEM_WB_register.result << endl;
-        cout <<  MEM_WB_register.rd << endl;
-        
-
-        instruct_list[MEM_WB_register.number_id].mem_exit = MEM_WB_register.mem_exit;
+        return;    
     }
-    else{
 
+   
+
+    //pass throught the function, if not LDUR or stur
+    string op = EX_MEM_register.opcode;
+
+    if (op != "LDUR" && op != "STUR") {
+      
     
-        MEM_WB_register = Instruction(); 
-        MEM_WB_register.opcode = "";
+        return;
+    }
+
+
+
+   // MEM works on the instruction in the EX_MEM register
+    if (EX_MEM_register.opcode != "") {
+        
+        string op = EX_MEM_register.opcode;
+        //int address = EX_MEM_register.result; // The address calculated in EX
+
+
+        int addr = EX_MEM_register.result;
+        int set = (addr >> 4) & 0x1; // 2 sets, so use 1 bit
+        int tag = (addr >> 5);       // Remaining bits are tag
+
+
+        // 1. Search both ways
+        int hit_way = -1;
+        for(int i = 0; i < 2; i++) {
+            if(d_cache[set][i].valid && d_cache[set][i].tag == tag) {
+                hit_way = i;
+                break;
+            }
+        }
+
+        if (hit_way != -1) {
+            // --- CACHE HIT ---
+            d_req++; 
+            d_hit++;
+            d_cache[set][hit_way].lru_counter = cycle; // Update LRU
+
+                if (op == "LDUR") {
+                    //MEM_WB_register.mem_data = data_memory[addr / 4];
+                    EX_MEM_register.result = data_memory[EX_MEM_register.result];
+                } 
+                
+                else if (op == "STUR") {
+                    // WRITE-BACK: Update cache only, mark dirty
+                    d_cache[set][hit_way].dirty = true;
+
+                    data_memory[addr / 4] = EX_MEM_register.result_data;
+                }
+
+            return;
+
+        }
+
+        else {
+            // --- CACHE MISS ---
+            // I-Cache has priority. We only proceed if Fetch isn't missing 
+            // AND the bus is free.
+            if (cycle >= memory_bus_busy_until) {
+                d_req++;
+                
+                // Determine LRU way to replace
+                int way = (d_cache[set][0].lru_counter <= d_cache[set][1].lru_counter) ? 0 : 1;
+                
+                int penalty = 12; // Base: 12 cycles to read the block
+                
+                // If the block being kicked out is DIRTY, write it back (+12 cycles)
+                if (d_cache[set][way].valid && d_cache[set][way].dirty) {
+                    penalty += 12;
+                }
+
+                memory_bus_busy_until = cycle + penalty;
+                dcache_stall_cycles = penalty - 1;
+
+                // Replace and Update metadata
+                d_cache[set][way].valid = true;
+                d_cache[set][way].tag = tag;
+                d_cache[set][way].dirty = (op == "STUR");
+                d_cache[set][way].lru_counter = cycle;
+
+        
+                return; // Stay in EX_MEM_register until the stall is over
+            }
+  
+    }
 
     }
 }
@@ -1272,15 +1240,16 @@ void writeBack() {
                 
             }
         }
-        instruct_list[MEM_WB_register.number_id].wb_exit = MEM_WB_register.wb_exit;
-      
-    }
-    else{
 
-    
+        instruct_list[MEM_WB_register.number_id].wb_exit = MEM_WB_register.wb_exit;
+
+
+        //clear out register after use
         MEM_WB_register = Instruction(); 
         MEM_WB_register.opcode = "";
+     
 
+      
     }
 }
 
@@ -1294,24 +1263,24 @@ void debugFunction(){
     //debug for fetch
     cout << "fetch_debug" << endl;
     cout << "Cycle " << cycle << " | IF_ID holds: " << IF_ID_register.opcode << endl;
-    cout << "Cycle " << cycle << " | ID_IU1 holds: " << ID_IU1_register.opcode << endl;
+    cout << "Cycle " << cycle << " | ID_EX holds: " << ID_EX_register.opcode << endl;
     cout << "-----------------------------------" << endl;
 
     //debug for decode
     cout << "decode_debug" << endl;
     cout << "Cycle " << cycle << ":" << endl;
-    cout << "  Fetch Stage (IF_ID): " << IF_ID_register.opcode << endl;
-    cout << "  Decode Stage (ID_IU1): " << ID_IU1_register.opcode 
-    << " | Val1: " << ID_IU1_register.val1 
-    << " | Val2: " << ID_IU1_register.val2 << endl;
+    cout << "  Fetch Stage (fetched instruc): " << fetched_instruction.opcode << endl;
+    cout << "  Decode Stage (ID_EX): " << IF_ID_register.opcode 
+    << " | Val1: " << IF_ID_register.val1 
+    << " | Val2: " << IF_ID_register.val2 << endl;
     cout << "-----------------------------------" << endl;
   
 
     //debug for result of execution
     cout << "execute_debug" << endl;
     cout << "Cycle " << cycle << ":" << endl;
-    cout << "  Execute Stage (IU1_IU2): " << IU3_MEM_register.opcode 
-    << " | Result: " << IU3_MEM_register.result << endl;
+    cout << "  Execute Stage (IU1_IU2): " << ID_EX_register.opcode 
+    << " | Result: " << ID_EX_register.result << endl;
     cout << "-----------------------------------" << endl;
 
 
@@ -1342,9 +1311,9 @@ void debugFunction(){
 
         /*
         cout << "--- Cycle " << cycle << " ---" << endl;
-        cout << "ID_IU1_register Opcode: " << ID_IU1_register.opcode << endl;
-        cout << "ID_IU1_register Val1 (Rn): " << ID_IU1_register.val1 << endl;
-        cout << "ID_IU1_register Val2 (Rm/Imm): " << ID_IU1_register.val2 << endl;
+        cout << "ID_EX_register Opcode: " << ID_EX_register.opcode << endl;
+        cout << "ID_EX_register Val1 (Rn): " << ID_EX_register.val1 << endl;
+        cout << "ID_EX_register Val2 (Rm/Imm): " << ID_EX_register.val2 << endl;
         cout << "----------------------" << endl;
         */
 
@@ -1357,10 +1326,10 @@ void debugFunction(){
         */
 
         /*
-        // Inside your while loop, after all functions and movements:
+        // Inside  while loop, after all functions and movements:
         cout << "CYCLE " << cycle << " DEBUG:" << endl;
         cout << "  1. IF_ID   Op: " << IF_ID_register.opcode << endl;
-        cout << "  2. ID_IU1  Op: " << ID_IU1_register.opcode << " | V1: " << ID_IU1_register.val1 << " | V2: " << ID_IU1_register.val2 << endl;
+        cout << "  2. ID_EX  Op: " << ID_EX_register.opcode << " | V1: " << ID_EX_register.val1 << " | V2: " << ID_EX_register.val2 << endl;
         cout << "  3. IU1_IU2 Op: " << IU1_IU2_register.opcode << " | Res: " << IU1_IU2_register.result << endl;
         */
 
@@ -1369,15 +1338,15 @@ void debugFunction(){
         cout << "================ CYCLE " << cycle << " ================" << endl;
         cout << " [IF]  register: " << IF_ID_register.opcode << endl;
 
-        cout << " [ID]  register: " << ID_IU1_register.opcode 
-            << " | V1: " << ID_IU1_register.val1 
-            << " | V2: " << ID_IU1_register.val2 << endl;
+        cout << " [ID]  register: " << ID_EX_register.opcode 
+            << " | V1: " << ID_EX_register.val1 
+            << " | V2: " << ID_EX_register.val2 << endl;
 
         cout << " [EX]  register: " << IU1_IU2_register.opcode 
             << " | Result: " << IU1_IU2_register.result << endl;
 
-        cout << " [MEM] register: " << IU3_MEM_register.opcode 
-            << " | Result: " << IU3_MEM_register.result << endl;
+        cout << " [MEM] register: " << EX_MEM_register.opcode 
+            << " | Result: " << EX_MEM_register.result << endl;
 
         cout << " [WB]  register: " << MEM_WB_register.opcode 
             << " | Writing " << MEM_WB_register.result << " to R" << MEM_WB_register.rd << endl;
@@ -1458,11 +1427,34 @@ void printExits(Instruction instruct){
 
 void executeHazardCheck(){
 
-    string op = ID_IU1_register.opcode;
+    string op = ID_EX_register.opcode;
 
-    cout << "EX is looking for R" << ID_IU1_register.rn << endl;
-    cout << "IU3_MEM contains R" << IU3_MEM_register.rd << endl;
+    cout << "EX is looking for R" << ID_EX_register.rn << endl;
+    cout << "EX_MEM contains R" << EX_MEM_register.rd << endl;
     cout << "MEM_WB contains R" << MEM_WB_register.rd << endl;
+
+    //check load use hazards
+    if (EX_MEM_register.opcode == "LDUR") {
+
+        bool needsLoadData = false;
+
+         // Check if instruction uses the register LDUR is currently fetching
+        if (EX_MEM_register.rd != 31) {
+
+            if (EX_MEM_register.rd == ID_EX_register.rn || EX_MEM_register.rd == ID_EX_register.rm) {
+                needsLoadData = true;
+            }
+            // Special case for STUR: rd is also a source register
+            if (ID_EX_register.opcode == "STUR" && EX_MEM_register.rd == ID_EX_register.rd) {
+                needsLoadData = true;
+            }
+        }
+
+        if (needsLoadData) {
+            ID_EX_register.latency = 2; // 1 cycle bubble is enough to let LDUR reach MEM_WB
+            return; // Stop here; don't perform forwarding yet
+        }
+    }
 
     //R[Rd] = R[Rn] + R[Rm]
     if(op == "ADD" || op == "MUL" || op == "SUB" || op == "AND" || op == "ORR"){
@@ -1470,36 +1462,36 @@ void executeHazardCheck(){
         //Check Rn (Source 1) 
 
         //EX/MEM hazard
-        if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rn) {
+        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_EX_register.rn) {
 
             cout << " c1" << endl;
             cout << endl;
 
-            ID_IU1_register.val1 = IU3_MEM_register.result;
+            ID_EX_register.val1 = EX_MEM_register.result;
 
         }
 
         //MEM/WB hazard
-        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_IU1_register.rn) {
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_EX_register.rn) {
 
               cout << " c2" << endl;
               cout << endl;
 
-            ID_IU1_register.val1 = MEM_WB_register.result;
+            ID_EX_register.val1 = MEM_WB_register.result;
         }
         
         //Check Rm (Source 2).
         //EX/MEM hazard
-        if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rm) {
+        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_EX_register.rm) {
 
-            ID_IU1_register.val2 = IU3_MEM_register.result;
+            ID_EX_register.val2 = EX_MEM_register.result;
 
         }
 
         //MEM/WB hazard
-        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_IU1_register.rm) {
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_EX_register.rm) {
 
-            ID_IU1_register.val2 = MEM_WB_register.result;
+            ID_EX_register.val2 = MEM_WB_register.result;
         }
     }
 
@@ -1507,64 +1499,170 @@ void executeHazardCheck(){
 
         //Check only Rn. (The second operand is an immediate, so it can't have a data hazard).
         //EX/MEM hazard
-        if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rn) {
+        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_EX_register.rn) {
 
             cout << "cond1" << endl;
 
-            ID_IU1_register.val1 = IU3_MEM_register.result;
+            ID_EX_register.val1 = EX_MEM_register.result;
 
         }
 
         //MEM/WB hazard
-        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_IU1_register.rn) {
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_EX_register.rn) {
 
             cout << "cond2" << endl;
 
-            ID_IU1_register.val1 = MEM_WB_register.result;
+            ID_EX_register.val1 = MEM_WB_register.result;
         }
 
     }
 
     if (op == "STUR"){
 
-        /*
 
         //Check Rn (Base address) 
-        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_IU1_register.rn) {
-            final_Rn = EX_MEM_register.alu_result;
+        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_EX_register.rn) {
+
+            ID_EX_register.val1 = EX_MEM_register.result;
+
         }
-        else if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rn) {
-            // If the previous instruction was a Load, grab its memory data, otherwise its ALU result
-            final_Rn = (IU3_MEM_register.opcode == "LDUR") ? IU3_MEM_register.mem_data : IU3_MEM_register.alu_result;
-        }
-        else {
-            final_Rn = ID_IU1_register.val_rn;
+
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_EX_register.rn) {
+
+            ID_EX_register.val1 = MEM_WB_register.result;
+
         }
         
         
-        //Check Rt (The data being stored is a source here!).
-        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_IU1_register.rt) {
-        final_Rt = EX_MEM_register.alu_result;
+        //Check Rd, source data
+        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_EX_register.rd) {
+
+                ID_EX_register.result_data = EX_MEM_register.result; 
+
         }
-        else if (IU3_MEM_register.regWrite && IU3_MEM_register.rd != 31 && IU3_MEM_register.rd == ID_IU1_register.rt) {
-            final_Rt = (IU3_MEM_register.opcode == "LDUR") ? IU3_MEM_register.mem_data : IU3_MEM_register.alu_result;
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_EX_register.rd) {
+
+                ID_EX_register.result_data = MEM_WB_register.result;
         }
-
-        */
-
-
     }
 
 
     if (op == "CBZ" || op == "CBNZ"){
 
-        //Check Rt. (This is the register being compared to zero).
+      
+        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_EX_register.rn) {
+
+            ID_EX_register.val1 = EX_MEM_register.result;
+        }
+
+        // Forward from MEM_WB stage
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_EX_register.rn) {
+
+            ID_EX_register.val1 = MEM_WB_register.result;
+        }
 
     } 
 
     if (op == "MOVK"){
 
-        //Check Rd. Since MOVK keeps the other bits of the register, the current value of Rd is actually a source!
+        //Check Rd. 
+        if (EX_MEM_register.regWrite && EX_MEM_register.rd != 31 && EX_MEM_register.rd == ID_EX_register.rd) {
 
+            ID_EX_register.val1 = EX_MEM_register.result;
+
+        }
+        // Forward from MEM_WB stage
+        else if (MEM_WB_register.regWrite && MEM_WB_register.rd != 31 && MEM_WB_register.rd == ID_EX_register.rd) {
+
+            ID_EX_register.val1 = MEM_WB_register.result;
+
+        }
+
+    }
+}
+
+//pipiline registers can move if not occupied
+void moveRegisters(){
+   
+
+    //only mpove foward if next pipeline register is empty & current isnt stalling
+    // dont do anything if both are empty
+    if (MEM_WB_register.opcode == "" && dcache_stall_cycles == 0  
+        && (MEM_WB_register.opcode != EX_MEM_register.opcode)){
+
+        MEM_WB_register = EX_MEM_register;
+
+
+
+        //update leaving value
+        MEM_WB_register.mem_exit = cycle;
+        instruct_list[MEM_WB_register.number_id].mem_exit = MEM_WB_register.mem_exit;
+
+        //if you move the Register you can empty it out
+        EX_MEM_register = Instruction(); 
+        EX_MEM_register.opcode = "";
+
+    }
+
+
+    //only move is next pipeline register is empty and is's finished in the IU
+    if(EX_MEM_register.opcode == "" && ID_EX_register.latency == 0
+     && (EX_MEM_register.opcode != ID_EX_register.opcode)){
+
+        cout << "Moving ID_EX to EX_MEM" << endl;
+        cout << ID_EX_register.opcode << endl;
+        cout << EX_MEM_register.opcode << endl;
+        cout << ID_EX_register.latency << endl;
+        cout << "result is " << ID_EX_register.result << endl;
+
+
+        EX_MEM_register = ID_EX_register;
+
+
+        
+
+        //update leaving value
+        EX_MEM_register.ex_exit = cycle;
+        instruct_list[EX_MEM_register.number_id].ex_exit = EX_MEM_register.ex_exit;
+
+        //if you move the Register you can empty it out
+        ID_EX_register = Instruction(); 
+        ID_EX_register.opcode = "";
+    }
+
+
+    //only move if next pipeline register is free and current isnt stalling
+    if(ID_EX_register.opcode == ""
+    && (ID_EX_register.opcode != IF_ID_register.opcode)){
+
+        ID_EX_register = IF_ID_register;
+        
+         
+
+        //update leaving value
+        ID_EX_register.id_exit = cycle;
+        instruct_list[ID_EX_register.number_id].id_exit = ID_EX_register.id_exit;
+
+        //if you move the IF/ID Register you can empty it out
+        IF_ID_register = Instruction(); 
+        IF_ID_register.opcode = "";
+    }
+
+
+     //start pipeline if we have an instrucion
+    if(IF_ID_register.opcode == "" && icache_miss_delay == 0 && instruciton_fetched == true){
+
+
+        IF_ID_register = fetched_instruction;
+        instruciton_fetched = false;
+        
+
+        //update leaving value
+        IF_ID_register.if_exit = cycle;
+        instruct_list[IF_ID_register.number_id].if_exit = IF_ID_register.if_exit;
+
+        //if you move the IF/ID Register you can empty it out
+        fetched_instruction = Instruction(); 
+        fetched_instruction.opcode = "";
     }
 }
