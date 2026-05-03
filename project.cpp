@@ -305,12 +305,29 @@ void testData(){
 
 
 
-int main(){
+int main(int argc, char* argv[]){
 
+    // Check if the user provided 3 arguments (plus the program name itself)
+    if (argc != 4) {
+        cerr << "Usage: " << argv[0] << " inst.txt data.txt output.txt" << endl;
+        return 1;
+    }
+
+    // Capture the filenames from the command line
+    string instFile = argv[1];
+    string dataFile = argv[2];
+    string outFile  = argv[3];
+
+    loadData(dataFile);
+    readInstructions(instFile);
+
+
+    /*
     loadData("data.txt");
     testData();
     readInstructions("inst.txt");
     printInstructions();
+    */
 
    
     
@@ -478,13 +495,18 @@ int main(){
         
 
         // A temporary break so we don't loop forever while testing
-        if (cycle == 80 || activeHalt ) break; 
+        if (activeHalt) break; 
         //  if (cycle > 100 || activeHalt == true) break; 
     }
 
    
-
+    /*
     printOutputFile("output.txt");
+    */
+
+    printOutputFile(outFile);
+    
+
 
     /*
     cout << "int reg 1: " << int_registers[1] << endl;
@@ -601,8 +623,10 @@ void readInstructions(string filename){
 
         
 
+        /*
          cout << "printing first token " << tokens[0] << endl;
          cout << "printing 2nd token " << tokens[1] << endl;
+         */
 
          //push back intruction when done
          instruct_list.push_back(createInstruction(tokens));
@@ -630,7 +654,12 @@ void printInstructions(){
 
 struct Instruction createInstruction(vector<string>& tokens){
 
+  
+
     Instruction instr;
+
+    // Safety check
+    if (tokens.empty()) return instr;
 
     string opcode = tokens[0];
 
