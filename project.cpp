@@ -627,7 +627,7 @@ void fetch(vector<Instruction>& program){
     }
 
     // If the PC is within the bounds of instruction vector
-    if (PC / 4 < program.size()) {
+    if ( PC / 4 < int(program.size()) )  {
         ICacheParts p = splitICache(PC);
         i_req++;
 
