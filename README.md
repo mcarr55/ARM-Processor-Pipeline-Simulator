@@ -22,6 +22,17 @@ To run the program you can use the makefile's make command in the directory to c
 After making, type "./simulator inst.txt data.txt output.txt" to run, with the instruction file, data file, and output file as inputs.
 
 
+Supported Instructions:
+Standard Arithmetic (ADD, SUB, MUL, AND, ORR)
+Shifts: (LSL, LSR)
+Immediate (ADDI, SUBI, ANDI, ORRI)
+Immediate with shift (MOVZ, MOVK)
+Data transfer (STUR, LDUR, LDURD, STURD)
+Conditional Branch (CBZ, CBNZ)
+Branch (B)
+HALT (HLT)
+
+
 
 
 
