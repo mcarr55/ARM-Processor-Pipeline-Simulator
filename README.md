@@ -27,7 +27,7 @@ Based on the intructions, they are loaded into Pipeline.
 - Writeback: Updates the vaue of the desitnation register as specified by the intruction. 
 
 
-At the end of the program after 2 HLT instruciotns, the program ends and the cucle each intruciton exited each phaase is lisited. As well as the requests and successfult hits from the instruction and data caches.
+At the end of the program after 2 HLT instructions, the program ends and the cycle each intruciton exited each phaase is lisited in the output file, as well as the requests and successfult hits from the instruction and data caches.
 
 
 ## Known issues:
