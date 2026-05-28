@@ -47,14 +47,14 @@ After making, type "./simulator inst.txt data.txt output.txt" to run, with the i
 
 ### Supported Instructions:
 
-Standard Arithmetic (ADD, SUB, MUL, AND, ORR)
-Shifts: (LSL, LSR)
-Immediate (ADDI, SUBI, ANDI, ORRI)
-Immediate with shift (MOVZ, MOVK)
-Data transfer (STUR, LDUR, LDURD, STURD)
-Conditional Branch (CBZ, CBNZ)
-Branch (B)
-HALT (HLT)
+- Standard Arithmetic (ADD, SUB, MUL, AND, ORR)
+- Shifts: (LSL, LSR)
+- Immediate (ADDI, SUBI, ANDI, ORRI)
+- Immediate with shift (MOVZ, MOVK)
+- Data transfer (STUR, LDUR, LDURD, STURD)
+- Conditional Branch (CBZ, CBNZ)
+- Branch (B)
+- HALT (HLT)
 
 
 
