@@ -9,7 +9,7 @@ It reads and performs the instruction files in inst.txt, loads the values from d
 
 ## Process of Program:
 
-An intruction file written in assembly is loaded from inst.txt
+An instruction file written in assembly is loaded from inst.txt
 
 The values of memory represnted from binary 0s and 1 are loaded from data.txt.
 
